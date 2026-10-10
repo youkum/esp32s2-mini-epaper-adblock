@@ -136,6 +136,16 @@ button.primary:hover{filter:brightness(1.09)}
     </form>
     <div class="hint">保存后设备会重启并连接新的网络。若一直连不上，长按开发板 BOOT 键 3 秒可重新开启配网热点。</div>
   </section>
+
+  <section class="card">
+    <h2>管理员密码 <small>用户名 admin</small></h2>
+    <form id="pform" class="row" onsubmit="return false">
+      <input id="np1" type="password" placeholder="新密码（6-64 位，不含空格）" autocomplete="new-password">
+      <input id="np2" type="password" placeholder="再次输入新密码" autocomplete="new-password">
+      <button class="primary" onclick="setPass()">修改密码</button>
+    </form>
+    <div class="hint">修改成功后浏览器会要求用新密码重新登录。密码保存在设备上，重启后依然有效；忘记密码可在串口日志中查看。</div>
+  </section>
 </main>
 <div class="toast" id="t"></div>
 <script>
@@ -186,6 +196,16 @@ async function addB(){ var d=$("d2").value.trim(); if(!d) return; await fetch("/
 async function unb(d){ await fetch("/unblock?token="+TK+"&d="+encodeURIComponent(d)); toast("已移除"); load() }
 async function saveUp(){ await fetch("/setupdate?token="+TK+"&url="+encodeURIComponent($("upurl").value.trim())+"&iv="+$("upiv").value); toast("已保存"); load() }
 async function refreshScreen(){ await fetch("/refresh-screen?token="+TK); toast("正在刷新屏幕"); }
+async function setPass(){
+  var a=$("np1").value,b=$("np2").value;
+  if(a.length<6||a.length>64){ toast("密码长度需为 6-64 位"); return }
+  if(a!==b){ toast("两次输入不一致"); return }
+  var r=await fetch("/setpass",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:"token="+encodeURIComponent(TK)+"&new="+encodeURIComponent(a)});
+  if(r.ok){ $("np1").value="";$("np2").value=""; toast("密码已修改，请重新登录"); return }
+  var msg=await r.text();
+  var map={length:"密码长度需为 6-64 位",charset:"密码只能使用可见 ASCII 字符且不含空格",same:"新密码与当前密码相同","bad token":"会话已过期，请刷新页面"};
+  toast(map[msg]||"修改失败");
+}
 load(); setInterval(load,5000);
 </script></body></html>
 )HTML";

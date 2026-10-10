@@ -1,13 +1,15 @@
 # Generate 16x16 1-bit glyph bitmaps from a real Chinese font.
 # Hand-authored bitmaps produced look-alike hanzi, so the table is
 # derived from SimHei and only the bytes are committed.
+import os
 from PIL import Image, ImageDraw, ImageFont
 
 CHARS = "".join(dict.fromkeys(
     "今日拦截查询总数率次每小时暂无据域名排行榜记录累计运天更新配网模式浏览器打开启动中正在连接"))
 
 SIZE = 16
-FONT = r"C:\\Windows\\Fonts\\simhei.ttf"
+# SimHei ships with Windows; override with CJK_FONT=... on other hosts.
+FONT = os.environ.get("CJK_FONT", r"C:\Windows\Fonts\simhei.ttf")
 font = ImageFont.truetype(FONT, SIZE)
 
 out = []
@@ -84,7 +86,8 @@ const uint8_t* cjkGlyph(const char* utf8) {
 
 src = HEAD + "\n\n".join(parts) + "\n" + (MID % ",\n".join(table))
 
-path = r"D:\\works\\3.98\\merged-adblock-epd\\src\\cjk_font.cpp"
+path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "src", "cjk_font.cpp")
 open(path, "w", encoding="utf-8").write(src)
 print("glyphs", len(out))
 print("".join(c for c, _ in out))

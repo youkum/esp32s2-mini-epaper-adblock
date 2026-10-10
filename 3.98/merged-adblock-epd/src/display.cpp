@@ -143,6 +143,25 @@ int utf8Len(const char* msg) {
 static int s_bandRBase = 0;
 static int s_bandRows  = 0;
 
+// Logical-y rows that this band can actually show. plotPixel() clips with
+// r = (H-1-y) - s_bandRBase in [0, s_bandRows), which inverts to this
+// inclusive span. The banded renderer redraws the whole screen once per
+// band, so the helpers below use this to skip glyphs and rectangles that
+// fall entirely outside the current band instead of walking their pixels
+// only to have plotPixel() drop each one.
+static inline void bandYRanges(int* topIncl, int* botIncl) {
+  *topIncl = H - s_bandRBase - s_bandRows;   // may be < 0 for the last band
+  *botIncl = H - 1 - s_bandRBase;            // <= H-1
+}
+
+static inline bool rowsHitBand(int yTop, int height) {
+  if (height <= 0) return false;
+  int t, b;
+  bandYRanges(&t, &b);
+  int yBot = yTop + height - 1;
+  return yBot >= t && yTop <= b;
+}
+
 void canvasBindBand(uint8_t* buf, int rBase, int rows) {
   colorBuf    = buf;
   s_bandRBase = rBase;
@@ -177,14 +196,18 @@ static int drawOneGlyph(const char* p, int x, int y, int scale, uint8_t color) {
   if ((uint8_t)p[0] >= 0xE0 && (uint8_t)p[1] && (uint8_t)p[2]) {
     const uint8_t* g = cjkGlyph(p);
     if (g) {
-      for (int row = 0; row < CJK_GLYPH_H; row++) {
-        uint8_t hi = g[row * 2], lo = g[row * 2 + 1];
-        for (int col = 0; col < CJK_GLYPH_W; col++) {
-          uint8_t bit = (col < 8) ? (hi >> (7 - col)) : (lo >> (7 - (col - 8)));
-          if (!(bit & 1)) continue;
-          for (int dy = 0; dy < scale; dy++)
-            for (int dx = 0; dx < scale; dx++)
-              plotPixel(x + col * scale + dx, y + row * scale + dy, color);
+      // Skip the whole glyph when its line box misses this band; the
+      // advance is returned either way so layout stays identical.
+      if (rowsHitBand(y, CJK_GLYPH_H * scale)) {
+        for (int row = 0; row < CJK_GLYPH_H; row++) {
+          uint8_t hi = g[row * 2], lo = g[row * 2 + 1];
+          for (int col = 0; col < CJK_GLYPH_W; col++) {
+            uint8_t bit = (col < 8) ? (hi >> (7 - col)) : (lo >> (7 - (col - 8)));
+            if (!(bit & 1)) continue;
+            for (int dy = 0; dy < scale; dy++)
+              for (int dx = 0; dx < scale; dx++)
+                plotPixel(x + col * scale + dx, y + row * scale + dy, color);
+          }
         }
       }
       return CJK_GLYPH_W * scale;
@@ -193,12 +216,14 @@ static int drawOneGlyph(const char* p, int x, int y, int scale, uint8_t color) {
   }
 
   const uint8_t* glyph = getGlyph(p[0]);
-  for (int col = 0; col < 5; col++) {
-    for (int row = 0; row < 7; row++) {
-      if (!(glyph[col] & (1 << row))) continue;
-      for (int dy = 0; dy < scale; dy++)
-        for (int dx = 0; dx < scale; dx++)
-          plotPixel(x + col * scale + dx, y + row * scale + dy, color);
+  if (rowsHitBand(y, 7 * scale)) {
+    for (int col = 0; col < 5; col++) {
+      for (int row = 0; row < 7; row++) {
+        if (!(glyph[col] & (1 << row))) continue;
+        for (int dy = 0; dy < scale; dy++)
+          for (int dx = 0; dx < scale; dx++)
+            plotPixel(x + col * scale + dx, y + row * scale + dy, color);
+      }
     }
   }
   return 5 * scale + scale;   // 5 columns plus one column of spacing
@@ -228,6 +253,11 @@ void drawTextColor(const char* msg, int x, int y, int scale, uint8_t color) {
 
 void fillRectColor(int x, int y, int w, int h, uint8_t color) {
   if (!colorBuf) return;
+
+  // Rectangles that miss this band entirely (the header bar, the footer
+  // rule, most histogram bars) would otherwise have every one of their
+  // pixels walked just to be clipped away inside the loop.
+  if (w <= 0 || !rowsHitBand(y, h)) return;
 
   for (int py = y; py < y + h; py++) {
     if (py < 0 || py >= H) continue;

@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-本仓库的票与规格都活在 GitHub Issues（`youkum/test`）。See `docs/agents/issue-tracker.md`.
+本仓库的票与规格都活在 GitHub Issues（`youkum/esp32s2-mini-epaper-adblock`）。See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

@@ -76,19 +76,21 @@ Two transforms sit in the drawing path and they cancel out:
   four 2-bit pixels inside each byte.
 
 The driver also has to place each row in the right `0x83` window. The
-vendor's invariant is `window p carries data row H-1-p`; it never writes
-that down because its source buffer is a whole frame and its `flippedY`
-lookup keeps window and data in step automatically. A banded renderer
-streams *logical* rows, so it must state the invariant itself: band-local
-row `k` is logical row `rBase+k` and therefore belongs in window
-`H-1-(rBase+k)`.
+vendor driver writes one row at a time, every row with its own window, and
+its loop reduces in closed form: source data row `d` goes to window
+`2d+1` for `d < H/2` and to window `2(H-1-d)` for `d >= H/2`. The panel
+therefore interleaves the two halves of the frame in window space — the
+odd windows carry the first half of the image, the even windows carry the
+second half in reverse. A banded renderer that streams *logical* rows has
+to reproduce this exactly, so the window is always derived from the
+**data row** (`rBase + k`), never from a running counter.
 
-Copying the vendor's *window* expression (`2r+1` / `2(H-1-r)`) into the
-band loop instead is a subtle and total break: consecutive logical rows
-land two panel rows apart, the frame splits into two interleaved combs,
-and every byte is still accepted — the panel reports a healthy 15 s
-refresh while the picture on the glass is shredded. It was a photograph
-of the panel that caught it, not the logs.
+A counter that merely walks the panel top to bottom (`0,1,2,...`) instead
+is a subtle and total break: consecutive logical rows land two panel rows
+apart, the frame splits into two interleaved combs, and every byte is
+still accepted — the panel reports a healthy 15 s refresh while the
+picture on the glass is shredded. It was a photograph of the panel that
+caught it, not the logs.
 
 Net effect: the canvas is in normal logical coordinates. **Always draw
 through `drawTextColor` / `fillRectColor`; never index `colorBuf`
@@ -237,3 +239,31 @@ It does not run a DHCP server by default, so it never has to be the
 gateway, only the resolver. Queries against it either come back as
 `0.0.0.0` / `::` (blocked) or as the real answer forwarded from
 9.9.9.9.
+
+## Throughput, and the burst ceiling
+
+A household resolver sees single-digit queries per second, and at that
+load the device is lossless. Sustained load only starts to bite around
+100 qps:
+
+| offered rate | loss |
+|---|---|
+| ≤ 50 qps | 0% |
+| ~100 qps | ~44% |
+| ~200 qps | ~77% |
+| ~300 qps | ~87% |
+
+The limit is a **single-burst ceiling of about six datagrams**, not a
+throughput wall: pulse twenty queries at once and the first six are
+answered, the rest discarded. It is lwIP's UDP receive mailbox depth
+(`CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6`) in the pre-compiled `liblwip.a`,
+so anything past the sixth packet is dropped before the firmware's DNS
+code ever sees it. Spacing the same twenty out at 10 ms apart recovers
+18-19 of them, which is why ordinary traffic is unaffected and why DNS
+clients (which retry on timeout) ride it out.
+
+This is accepted as a known limit rather than patched: the fixes — a
+rebuilt lwIP with a deeper mailbox, or a raw-PCB `udp_recv()` callback —
+are not worth it for a home network. A drain loop around `parsePacket()`
+only clears what is already queued; it cannot recover packets lwIP has
+already dropped.

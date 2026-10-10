@@ -50,6 +50,22 @@ not a content display for a remote service.
   refresh. Logs cannot catch this - only looking at the glass can.
 * `trackerRecord()` runs on every DNS query. No `String`, no
   `malloc`, no logging on that path.
+* The UDP DNS path has a **hard burst ceiling of ~6 datagrams**, and it
+  is accepted, not a bug to chase. lwIP is pre-compiled with
+  `CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6`, so a burst larger than six
+  overflows the receive mailbox and lwIP drops the excess before
+  `handleDns()` runs. Measured: ≤50 qps sustained is 0% loss, ~100 qps
+  loses ~44%, ~300 qps loses ~86%; in a single burst anything past the
+  sixth packet is lost. Proof it is the arrival layer and not slow
+  handling: valid BLOCKED (flash lookup), FORWARD (upstream) and
+  NXDOMAIN queries, which cost wildly different amounts, all cap at the
+  same ~6 of 20, and warming the ARP entry changes nothing. A
+  `for`-loop around `parsePacket()` (`DNS_DRAIN_MAX`) only clears what is
+  already queued; it cannot recover what lwIP has already dropped, so do
+  not expect it to raise the ceiling. The only real fixes are rebuilding
+  `liblwip.a` with a deeper mailbox, or a raw-PCB `udp_recv()` callback;
+  both are out of scope while a household resolver runs single-digit qps
+  and DNS clients retry on timeout.
 * The blocklist header format is fixed at `HASH_BYTES = 5`, magic
   `CADB`, and must stay in sync with `tools/build_blocklist.py`.
 * WiFi credentials resolve in this order: `/wifi.cfg` (written by the

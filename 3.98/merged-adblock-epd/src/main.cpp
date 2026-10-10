@@ -50,7 +50,7 @@ static const int MAX_CUSTOM = 200;
 static const int MAX_BAN = 32;
 static const uint32_t UPSTREAM_TIMEOUT_MS = 2000;
 static const uint32_t REMOTE_FETCH_IDLE_MS = 3000;
-static const char* DASHBOARD_ETAG = "adblk-console-v2";
+static const char* DASHBOARD_ETAG = "adblk-console-v3";
 
 // ---- logging ----
 #ifdef NDEBUG
@@ -375,14 +375,24 @@ static void pollUpstream(uint8_t* buf, int bufSize) {
 
 static uint8_t dnsBuf[DNS_BUF_SIZE];
 
-static void handleDns() {
+// One datagram per loop() pass is not enough: the SDK's lwIP UDP receive
+// mailbox is only CONFIG_LWIP_UDP_RECVMBOX_SIZE (6) deep, so a client that
+// fires a page's worth of lookups at once overflows it and lwIP drops the
+// surplus before the loop comes back around. Draining a small batch per
+// pass empties the mailbox faster and turns a burst from mostly-lost into
+// mostly-answered. The cap stays small so one busy moment cannot starve
+// the web server, OTA and the panel service that share this loop.
+static const int DNS_DRAIN_MAX = 8;
+
+// Handle exactly one datagram. Returns false when the mailbox is empty.
+static bool serveOneDns() {
   int sz = dnsServer.parsePacket();
-  if (sz <= 0) return;
+  if (sz <= 0) return false;
   lastDnsActivityMs = millis();
   IPAddress cip = dnsServer.remoteIP();
   uint16_t cport = dnsServer.remotePort();
   int qlen = dnsServer.read(dnsBuf, sizeof(dnsBuf));
-  if (qlen < 13) return;
+  if (qlen < 13) return true;
 
   char domain[256]; uint16_t qtype = 0; int qend = qlen;
   size_t dl = parseQuery(dnsBuf, qlen, domain, &qtype, &qend);
@@ -400,7 +410,7 @@ static void handleDns() {
     dnsServer.endPacket();
   } else {
     int slot = findFreeSlot();
-    if (slot < 0) return;
+    if (slot < 0) return true;
     uint16_t origID = (dnsBuf[0] << 8) | dnsBuf[1];
     dnsBuf[0] = (slot >> 8) & 0xFF;
     dnsBuf[1] = slot & 0xFF;
@@ -420,6 +430,13 @@ static void handleDns() {
   // Feed the dashboard. Only name-bearing queries are counted, so a
   // malformed packet cannot skew the statistics.
   if (dl) trackerRecord(domain, blocked);
+  return true;
+}
+
+static void handleDns() {
+  for (int i = 0; i < DNS_DRAIN_MAX; i++) {
+    if (!serveOneDns()) break;
+  }
 }
 
 // ---- TCP DNS ----
@@ -557,6 +574,14 @@ static void requireAuth() {
   web.send(401, "text/plain", "auth required");
 }
 
+// Persist the admin password and CSRF token to /auth.cfg (password on
+// line 1, token on line 2). Used when the user changes the password from
+// the console, so the new one survives a reboot.
+static void saveAuth() {
+  File f = LittleFS.open("/auth.cfg", "w");
+  if (f) { f.println(authPassword); f.println(authToken); f.close(); }
+}
+
 // ---- web server ----
 static String macStr(const uint8_t* m) {
   char s[18]; snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", m[0],m[1],m[2],m[3],m[4],m[5]);
@@ -609,7 +634,15 @@ static void handleStats() {
   snprintf(ut, sizeof(ut), "%lud %luh %lum", up/86400, (up%86400)/3600, (up%3600)/60);
   String bloomStr = bloomFilter ? (String(bloomBits / 8 / 1024) + " KB") : String("off");
 
-  String j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked +
+  // Built by concatenating well over a hundred small fragments (up to ~17 KB
+  // with 96 clients and 200 custom domains). Growing a String that way
+  // reallocates and copies repeatedly, which is exactly the churn that
+  // fragments the ESP32 heap. Size it once from the live counts instead.
+  size_t est = 320 + (size_t)numClients * 96 + (size_t)numCustom * 34 +
+               (size_t)TOPN_SLOTS * 48 + (size_t)HIST_SLOTS * 8;
+  String j;
+  j.reserve(est);
+  j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked +
              ",\"allowed\":" + totalAllowed + ",\"todayBlocked\":" + trackerTodayBlocked() +
              ",\"todayAllowed\":" + trackerTodayTotal() + ",\"domains\":" + numHashes +
              ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
@@ -724,6 +757,42 @@ static void handleSetWifi() {
   web.send(200, "text/plain", "saved - rebooting...");
   delay(500);
   ESP.restart();
+}
+
+// ---- change the admin password ----
+// Reached from the console, which sits behind Basic Auth: a request that
+// gets this far has already been validated against the CURRENT password,
+// so the old one does not have to be sent again. The new password is
+// written straight to /auth.cfg and takes effect on the next request -
+// the browser, still caching the old credentials, will be re-prompted.
+// Error bodies stay ASCII (like the other endpoints); the console turns
+// them into Chinese toasts, so no panel glyphs are needed for them.
+static void handleSetPass() {
+  if (!checkAuth()) { requireAuth(); return; }
+  if (!checkToken()) { web.send(403, "text/plain", "bad token"); return; }
+  String np = web.arg("new");
+  if (np.length() < 6 || np.length() > 64) {
+    web.send(400, "text/plain", "length");
+    return;
+  }
+  // Keep /auth.cfg a valid single line: it is read back line-by-line, so a
+  // newline would split the password, and leading/trailing whitespace would
+  // be trimmed away. Printable ASCII without spaces sidesteps both.
+  for (size_t i = 0; i < np.length(); i++) {
+    char c = np[i];
+    if (c < 0x21 || c > 0x7E) {
+      web.send(400, "text/plain", "charset");
+      return;
+    }
+  }
+  if (np == authPassword) {
+    web.send(400, "text/plain", "same");
+    return;
+  }
+  authPassword = np;
+  saveAuth();
+  LOG("[AUTH] admin password changed, user admin password %s\n", authPassword.c_str());
+  web.send(200, "text/plain", "ok");
 }
 // ---- blocklist loading ----
 static bool loadBlocklist() {
@@ -1066,6 +1135,7 @@ void setup() {
   web.on("/addblock", handleAddBlock);
   web.on("/unblock", handleUnblock);
   web.on("/setupdate", handleSetUpdate);
+  web.on("/setpass", HTTP_POST, handleSetPass);
   web.on("/setwifi", HTTP_POST, handleSetWifi);
   web.on("/update", HTTP_POST, handleUpdateDone, handleUpdate);
   web.on("/blocklist-upload", HTTP_POST, handleBlocklistDone, handleBlocklistUpload);
