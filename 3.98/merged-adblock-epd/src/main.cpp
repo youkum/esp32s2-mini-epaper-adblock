@@ -345,6 +345,20 @@ struct Pending {
 Pending pending[MAX_PENDING];
 int pendingCount = 0;
 
+// Handle a small batch of datagrams per pass, on both the client socket
+// (handleDns) and the upstream socket (pollUpstream). This does NOT raise
+// the burst ceiling: the SDK's lwIP UDP receive mailbox is only
+// CONFIG_LWIP_UDP_RECVMBOX_SIZE (6) deep, so a client that fires a page's
+// worth of lookups at once overflows it and lwIP drops the surplus before
+// the loop is ever entered - draining faster cannot recover what was
+// already discarded (measured: three different query types, with wildly
+// different processing costs, all cap at the same ~6 of 20; see the burst
+// ceiling note in AGENTS.md). What the batch does buy is latency: each
+// pass empties whatever is currently queued instead of handing back one
+// datagram per loop turn. The cap stays small so one busy moment cannot
+// starve the web server, OTA and the panel service that share this loop.
+static const int DNS_DRAIN_MAX = 8;
+
 static int findFreeSlot() {
   for (int i = 0; i < MAX_PENDING; i++) if (!pending[i].active) return i;
   return -1;
@@ -358,31 +372,30 @@ static void expirePending() {
     }
 }
 static void pollUpstream(uint8_t* buf, int bufSize) {
-  int sz = upstream.parsePacket();
-  if (sz <= 0) return;
-  int rlen = upstream.read(buf, bufSize);
-  if (rlen < 2) return;
-  uint16_t replyID = (buf[0] << 8) | buf[1];
-  if (replyID >= MAX_PENDING || !pending[replyID].active) return;
-  buf[0] = (pending[replyID].originalID >> 8) & 0xFF;
-  buf[1] = pending[replyID].originalID & 0xFF;
-  dnsServer.beginPacket(pending[replyID].clientIP, pending[replyID].clientPort);
-  dnsServer.write(buf, rlen);
-  dnsServer.endPacket();
-  pending[replyID].active = false;
-  pendingCount--;
+  // Drain a small batch: the upstream socket shares the same 6-deep lwIP
+  // receive mailbox as the client socket, so when a forwarded batch comes
+  // back together, handling one reply per loop() pass overflows it and the
+  // extra replies are dropped (the client then waits out the timeout).
+  // Bounded like the client drain so one busy moment cannot starve the
+  // web server, OTA and the panel service.
+  for (int i = 0; i < DNS_DRAIN_MAX; i++) {
+    int sz = upstream.parsePacket();
+    if (sz <= 0) return;
+    int rlen = upstream.read(buf, bufSize);
+    if (rlen < 2) continue;
+    uint16_t replyID = (buf[0] << 8) | buf[1];
+    if (replyID >= MAX_PENDING || !pending[replyID].active) continue;
+    buf[0] = (pending[replyID].originalID >> 8) & 0xFF;
+    buf[1] = pending[replyID].originalID & 0xFF;
+    dnsServer.beginPacket(pending[replyID].clientIP, pending[replyID].clientPort);
+    dnsServer.write(buf, rlen);
+    dnsServer.endPacket();
+    pending[replyID].active = false;
+    pendingCount--;
+  }
 }
 
 static uint8_t dnsBuf[DNS_BUF_SIZE];
-
-// One datagram per loop() pass is not enough: the SDK's lwIP UDP receive
-// mailbox is only CONFIG_LWIP_UDP_RECVMBOX_SIZE (6) deep, so a client that
-// fires a page's worth of lookups at once overflows it and lwIP drops the
-// surplus before the loop comes back around. Draining a small batch per
-// pass empties the mailbox faster and turns a burst from mostly-lost into
-// mostly-answered. The cap stays small so one busy moment cannot starve
-// the web server, OTA and the panel service that share this loop.
-static const int DNS_DRAIN_MAX = 8;
 
 // Handle exactly one datagram. Returns false when the mailbox is empty.
 static bool serveOneDns() {
@@ -440,82 +453,132 @@ static void handleDns() {
 }
 
 // ---- TCP DNS ----
+// Served as a non-blocking state machine. A TCP DNS client, or a slow
+// upstream, must never stall loop(): answering everything inline used to
+// cost up to two UPSTREAM_TIMEOUT_MS windows of delay(1) spins - one
+// waiting for the request body and one waiting for the upstream reply -
+// which froze the panel service, the web console and UDP DNS for that
+// whole time. This handler now advances one step per pass and yields in
+// between, exactly like epdServiceRefresh() does for the panel.
+//
+// One connection is served at a time, and each carries one query, which
+// is what the previous implementation did too (it called stop() after
+// every reply). The upstream reply for a forwarded query carries the
+// sentinel ID 0xFFFE, which cannot collide with the UDP path's pending
+// slots (0..MAX_PENDING-1) because that path uses a different socket.
 WiFiServer tcpDnsServer(DNS_PORT);
 WiFiClient tcpDnsClient;
 static uint8_t tcpBuf[DNS_BUF_SIZE];
 
-static int forwardUpstreamSync(uint8_t* pkt, int qlen) {
-  uint16_t origID = (pkt[0] << 8) | pkt[1];
-  pkt[0] = 0xFF; pkt[1] = 0xFE;
-  tcpUpstream.beginPacket(UPSTREAM, 53);
-  tcpUpstream.write(pkt, qlen);
-  tcpUpstream.endPacket();
-  pkt[0] = (origID >> 8) & 0xFF; pkt[1] = origID & 0xFF;
-  uint32_t t0 = millis();
-  while (millis() - t0 < UPSTREAM_TIMEOUT_MS) {
-    int sz = tcpUpstream.parsePacket();
-    if (sz > 0) {
-      int n = tcpUpstream.read(pkt, DNS_BUF_SIZE);
-      if (n >= 2) {
-        pkt[0] = (origID >> 8) & 0xFF; pkt[1] = origID & 0xFF;
-        return n;
-      }
-      return 0;
-    }
-    delay(1);
+enum TcpState { TCP_IDLE, TCP_READ, TCP_FORWARD };
+static TcpState  tcpState    = TCP_IDLE;
+static uint8_t   tcpLenBuf[2];
+static int       tcpLenGot   = 0;
+static uint16_t  tcpMsgLen   = 0;
+static int       tcpGot      = 0;
+static uint32_t  tcpDeadline = 0;
+static uint16_t  tcpQueryID  = 0;
+
+static void tcpDnsReset() {
+  tcpDnsClient.stop();
+  tcpState  = TCP_IDLE;
+  tcpLenGot = 0;
+  tcpMsgLen = 0;
+  tcpGot    = 0;
+}
+
+// DNS-over-TCP frames every message with a 2-byte length prefix, in both
+// directions. Send the finished response and close.
+static void tcpDnsReply(const uint8_t* msg, int len) {
+  if (len > 0) {
+    uint8_t lenOut[2] = { (uint8_t)(len >> 8), (uint8_t)(len & 0xFF) };
+    tcpDnsClient.write(lenOut, 2);
+    tcpDnsClient.write(msg, len);
   }
-  return 0;
+  tcpDnsReset();
 }
 
 static void handleTcpDns() {
-  if (!tcpDnsClient || !tcpDnsClient.connected()) {
-    tcpDnsClient = tcpDnsServer.accept();
-    if (!tcpDnsClient) return;
-  }
-  if (!tcpDnsClient.connected()) return;
-  if (tcpDnsClient.available() < 2) return;
-
-  uint8_t lenBuf[2];
-  tcpDnsClient.read(lenBuf, 2);
-  uint16_t msgLen = (lenBuf[0] << 8) | lenBuf[1];
-  if (msgLen > DNS_BUF_SIZE) { tcpDnsClient.stop(); return; }
-
-  int total = 0;
-  uint32_t t0 = millis();
-  while (total < msgLen && tcpDnsClient.connected()) {
-    if (tcpDnsClient.available()) {
-      int n = tcpDnsClient.read(tcpBuf + total, msgLen - total);
-      if (n <= 0) break;
-      total += n;
-    } else {
-      if (millis() - t0 > UPSTREAM_TIMEOUT_MS) break;
-      delay(1);
+  // Idle: take the next pending connection, if there is one.
+  if (tcpState == TCP_IDLE) {
+    if (!tcpDnsClient || !tcpDnsClient.connected()) {
+      tcpDnsClient = tcpDnsServer.accept();
+      if (!tcpDnsClient) return;
     }
+    tcpState    = TCP_READ;
+    tcpLenGot   = 0;
+    tcpGot      = 0;
+    tcpDeadline = millis() + UPSTREAM_TIMEOUT_MS;
   }
-  if (total < msgLen) { tcpDnsClient.stop(); return; }
 
-  char domain[256]; uint16_t qtype = 0; int qend = total;
-  size_t dl = parseQuery(tcpBuf, total, domain, &qtype, &qend);
-  Dev* c = getClient((uint32_t)tcpDnsClient.remoteIP());
-  bool ban = c && c->banned;
-  bool blocked = ban || (dl && numHashes && isBlocked(domain, dl));
+  if (!tcpDnsClient.connected()) { tcpDnsReset(); return; }
 
-  int rlen;
-  if (blocked) {
-    rlen = buildBlocked(tcpBuf, qend, qtype);
-    totalBlocked++; if (c) c->blocked++;
-  } else {
-    rlen = forwardUpstreamSync(tcpBuf, total);
+  if (tcpState == TCP_READ) {
+    // Two-byte length prefix first.
+    while (tcpLenGot < 2) {
+      int n = tcpDnsClient.read(tcpLenBuf + tcpLenGot, 2 - tcpLenGot);
+      if (n <= 0) {
+        if ((int32_t)(millis() - tcpDeadline) >= 0) tcpDnsReset();
+        return;   // nothing to read yet; yield to the rest of loop()
+      }
+      tcpLenGot += n;
+    }
+    tcpMsgLen = (tcpLenBuf[0] << 8) | tcpLenBuf[1];
+    if (tcpMsgLen < 12 || tcpMsgLen > DNS_BUF_SIZE) { tcpDnsReset(); return; }
+
+    // Message body, up to the length just read.
+    while (tcpGot < tcpMsgLen) {
+      int n = tcpDnsClient.read(tcpBuf + tcpGot, tcpMsgLen - tcpGot);
+      if (n <= 0) {
+        if ((int32_t)(millis() - tcpDeadline) >= 0) tcpDnsReset();
+        return;   // partial message; yield and resume next pass
+      }
+      tcpGot += n;
+    }
+
+    char domain[256]; uint16_t qtype = 0; int qend = tcpGot;
+    size_t dl = parseQuery(tcpBuf, tcpGot, domain, &qtype, &qend);
+    Dev* c = getClient((uint32_t)tcpDnsClient.remoteIP());
+    bool ban = c && c->banned;
+    bool blocked = ban || (dl && numHashes && isBlocked(domain, dl));
+
+    if (blocked) {
+      int rlen = buildBlocked(tcpBuf, qend, qtype);
+      totalBlocked++; if (c) c->blocked++;
+      if (dl) trackerRecord(domain, blocked);
+      tcpDnsReply(tcpBuf, rlen);
+      return;
+    }
+
+    // Forward: rewrite the ID to the sentinel, remember the client's, and
+    // switch to the wait state. The reply is picked up on a later pass.
+    tcpQueryID = (tcpBuf[0] << 8) | tcpBuf[1];
+    tcpBuf[0] = 0xFF; tcpBuf[1] = 0xFE;
+    tcpUpstream.beginPacket(UPSTREAM, 53);
+    tcpUpstream.write(tcpBuf, tcpGot);
+    tcpUpstream.endPacket();
     totalAllowed++; if (c) c->allowed++;
+    if (dl) trackerRecord(domain, blocked);
+    tcpState    = TCP_FORWARD;
+    tcpDeadline = millis() + UPSTREAM_TIMEOUT_MS;
+    return;
   }
-  if (dl) trackerRecord(domain, blocked);
 
-  if (rlen > 0) {
-    uint8_t lenOut[2] = { (uint8_t)(rlen >> 8), (uint8_t)(rlen & 0xFF) };
-    tcpDnsClient.write(lenOut, 2);
-    tcpDnsClient.write(tcpBuf, rlen);
+  // TCP_FORWARD: the upstream reply arrives on tcpUpstream, not the client
+  // socket, so poll it and yield until it shows up or the deadline passes.
+  int sz = tcpUpstream.parsePacket();
+  if (sz > 0) {
+    int n = tcpUpstream.read(tcpBuf, DNS_BUF_SIZE);
+    if (n >= 12) {
+      tcpBuf[0] = (tcpQueryID >> 8) & 0xFF;
+      tcpBuf[1] = tcpQueryID & 0xFF;
+      tcpDnsReply(tcpBuf, n);
+    } else {
+      tcpDnsReset();
+    }
+    return;
   }
-  tcpDnsClient.stop();
+  if ((int32_t)(millis() - tcpDeadline) >= 0) tcpDnsReset();
 }
 // ---- auth (Basic Auth + CSRF token) ----
 String authPassword;
@@ -847,20 +910,6 @@ static bool loadBlocklist() {
   hashTableOffset = BL_HEADER_SIZE + bloomBytes;
   LOG("[BL] %u domains, bloom %u KB\n", numHashes, bloomFilter ? bloomBytes / 1024 : 0);
   return numHashes > 0;
-}
-
-struct BlocklistInfo { uint32_t count; uint32_t size; time_t mtime; bool loaded; };
-static BlocklistInfo blocklistInfo() {
-  BlocklistInfo info = { numHashes, 0, 0, blocklist || numHashes > 0 };
-  File f = LittleFS.open(BLOCKLIST_PATH, "r");
-  if (f) {
-    size_t sz = f.size();
-    time_t t = 0;
-    f.seek(0);
-    info.size = (uint32_t)sz;
-    info.loaded = sz > BL_HEADER_SIZE;
-  }
-  return info;
 }
 
 // ---- remote blocklist fetch ----
