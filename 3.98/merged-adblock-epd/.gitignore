@@ -1,0 +1,18 @@
+.pio/
+build.log
+buildfs.log
+release.log
+blocklist.log
+fetch.log
+firmware-merged.bin
+data/blocklist.bin
+tools/__pycache__/
+ADMIN-CREDENTIALS.txt
+
+# Console captures, flash dumps and one-off probe logs from bring-up.
+# They are evidence for a single debugging session, not sources.
+*.log
+serial*.txt
+*.bin
+!data/blocklist.bin
+git_status.txt

@@ -1,0 +1,18 @@
+# Root-level policy for this repo:
+# only the firmware project 3.98/merged-adblock-epd/ is tracked as source.
+# Everything else under 3.98/ (upstream archives, extracted copies, release
+# images, prebuilt flash dumps) is reference material and stays out of git.
+
+# Upstream archives and prebuilt binaries / images (huge, do not commit)
+/3.98/*.zip
+/3.98/*.bin
+/3.98/*.jpg
+
+# Extracted upstream sources (kept locally for reference only)
+/3.98/extracted-adblocker/
+/3.98/extracted-inksight/
+
+# One-off network / debug evidence captured at the repo root
+/dns*.txt
+/wlan.txt
+/ips.txt
