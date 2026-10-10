@@ -1,130 +1,126 @@
-# Detailed Guide
+# 详细指南
 
-**English** | [简体中文](GUIDE.zh-CN.md)
+**简体中文** | [English](GUIDE.en.md)
 
-A complete, start-to-finish walkthrough for building, flashing, configuring
-and troubleshooting the **esp32s2-mini-epaper-adblock** firmware.
+**ESP32-S2 mini 四色电子纸 DNS 广告拦截器**固件从零到跑通的完整步骤：
+构建、烧写、配置与故障排查。
 
-If you only want the short version, see the [README](README.md#quick-start).
-This document is the long version: what every part is, why it is the way it
-is, and what to do when something goes wrong.
+如果只想要最短路径，见 [README](README.md#快速开始)。本文是长版本：
+每一部分是什么、为什么这样设计，以及出问题时该怎么办。
 
-> **AI-built project.** Everything here was written by an AI agent and
-> verified on real hardware. Read the [AI-built declaration](README.md#ai-built-declaration)
-> before trusting it.
-
----
-
-## Table of contents
-
-1. [What you need](#1-what-you-need)
-2. [Wiring](#2-wiring)
-3. [Install the toolchain](#3-install-the-toolchain)
-4. [Build](#4-build)
-5. [Flash](#5-flash)
-6. [First boot: read the password](#6-first-boot-read-the-password)
-7. [Put it on the network](#7-put-it-on-the-network)
-8. [Point clients at it](#8-point-clients-at-it)
-9. [The web console](#9-the-web-console)
-10. [The e-paper dashboard](#10-the-e-paper-dashboard)
-11. [Changing the admin password](#11-changing-the-admin-password)
-12. [Blocklist: updating and customising](#12-blocklist-updating-and-customising)
-13. [Building a merged release image](#13-building-a-merged-release-image)
-14. [The tools directory](#14-the-tools-directory)
-15. [Performance and known limits](#15-performance-and-known-limits)
-16. [Troubleshooting](#16-troubleshooting)
-17. [Architecture notes](#17-architecture-notes)
+> **阅读约定**：本文为中文说明，但**信号名、GPIO 编号、接口名、命令、路径、
+> 标识符等技术术语一律保留英文原文**，以免翻译造成歧义。例如 `EPD DC`
+> 不译作「直流」、`EPD BUSY` 不译作「繁忙」、`Board` 不译作「董事会」、
+> `MIT` 不译作「麻省理工学院」、`trunk` 不译作「树干」。
+>
+> **AI 构建项目。** 本文内容由 AI 代理编写并在真实硬件上验证。信任前请先阅读
+> [AI 构建声明](README.md#ai-构建声明)。
 
 ---
 
-## 1. What you need
+## 目录
 
-**Hardware**
-
-* An **ESP32-S2 mini** board. Verified on **ESP32-S2FNR2**: 4 MB flash +
-  **2 MB PSRAM**. PSRAM is required — the 128 KB Bloom filter is allocated
-  there. A variant without PSRAM will not work.
-* A **7.5" 768×552 four-colour e-paper panel**, JDY79668 / GDEY075Z08 class.
-* A USB-C (or USB-micro, board dependent) data cable.
-* 9 female-to-female jumper wires.
-* Optional: a LiFePO4/18650 cell on the battery ADC pin for a cable-free
-  build.
-
-**Software**
-
-* **PlatformIO Core** (`python -m pip install --upgrade platformio`), or
-  the PlatformIO IDE extension.
-* **Python 3.8+** for the helper tools.
-* **Node.js** for the `tools/*.js` font/preview helpers (optional, only if
-  you change on-screen text).
-* **esptool** (installed automatically by PlatformIO; used directly only
-  for the merged-image path).
-
-**Knowledge**
-
-* Basic comfort with a terminal.
-* Knowing where your router's DNS setting lives (to point the whole
-  network at this device).
+1. [你需要准备什么](#1-你需要准备什么)
+2. [接线](#2-接线)
+3. [安装工具链](#3-安装工具链)
+4. [构建](#4-构建)
+5. [烧写](#5-烧写)
+6. [首次启动：读取密码](#6-首次启动读取密码)
+7. [接入网络](#7-接入网络)
+8. [把客户端指向它](#8-把客户端指向它)
+9. [Web 控制台](#9-web-控制台)
+10. [电子纸仪表盘](#10-电子纸仪表盘)
+11. [修改管理员密码](#11-修改管理员密码)
+12. [blocklist：更新与定制](#12-blocklist更新与定制)
+13. [构建合成发行镜像](#13-构建合成发行镜像)
+14. [tools 目录](#14-tools-目录)
+15. [性能与已知上限](#15-性能与已知上限)
+16. [故障排查](#16-故障排查)
+17. [架构说明](#17-架构说明)
 
 ---
 
-## 2. Wiring
+## 1. 你需要准备什么
 
-Wire the panel to the ESP32-S2 mini exactly as below. These are the pins
-carried over from InkSight's S2 profile and fixed in
-[`src/config.h`](3.98/merged-adblock-epd/src/config.h).
+**硬件**
 
-| Panel pin | ESP32-S2 mini GPIO | Notes |
+* 一块 **ESP32-S2 mini** 开发板。已在 **ESP32-S2FNR2** 上验证：4 MB flash +
+  **2 MB PSRAM**。PSRAM 是必需的——128 KB Bloom filter 就分配在那里。
+  没有 PSRAM 的型号无法工作。
+* 一块 **7.5 英寸 768×552 四色电子纸**，JDY79668 / GDEY075Z08 class。
+* 一根 USB-C（或 USB-micro，视板子而定）**数据线**。
+* 9 根母对母杜邦线。
+* 可选：接在 Battery ADC 引脚上的 LiFePO4 / 18650 电池，做成无线版本。
+
+**软件**
+
+* **PlatformIO Core**（`python -m pip install --upgrade platformio`），或
+  PlatformIO IDE 插件。
+* **Python 3.8+**，用于辅助脚本。
+* **Node.js**，用于 `tools/*.js` 的字体 / 预览脚本（可选，只有改屏上文字时
+  才需要）。
+* **esptool**（PlatformIO 会自动安装；只有走合成镜像路径时才直接用到）。
+
+**知识**
+
+* 基本的终端操作能力。
+* 知道你路由器里 DNS 设置在哪（好把整个网络指到这台设备）。
+
+---
+
+## 2. 接线
+
+按下表把面板接到 ESP32-S2 mini。这些引脚沿用了 InkSight 的 S2 配置，固定在
+[`src/config.h`](3.98/merged-adblock-epd/src/config.h) 中。
+
+| Panel pin | ESP32-S2 mini GPIO | 说明 |
 |---|---|---|
-| MOSI / DIN | **11** | bit-banged, any GPIO works |
+| MOSI / DIN | **11** | bit-bang，任意 GPIO 均可 |
 | SCK / CLK | **7** | |
 | CS | **12** | |
 | DC | **17** | data/command |
 | RST | **16** | |
-| BUSY | **4** | panel holds this during a refresh |
-| VCC | 3V3 | check your panel's datasheet |
-| GND | GND | common ground |
+| BUSY | **4** | 刷新期间面板会拉低此脚 |
+| VCC | 3V3 | 请对照你面板的 datasheet |
+| GND | GND | 共地 |
 
-Board-local pins:
+板载引脚：
 
-| Function | GPIO |
+| 功能 | GPIO |
 |---|---|
 | Battery ADC | 6 |
 | Config button | 0 (BOOT) |
 | Status LED | 15 |
 
-> **Do not** try to move the panel onto the hardware SPI peripheral. The
-> firmware bit-bangs SPI on purpose — see
-> [Performance and known limits](#15-performance-and-known-limits).
+> **切勿**把面板改接到硬件 SPI 外设上。本固件是**刻意**用 bit-bang 驱动 SPI
+> 的——原因见 [性能与已知上限](#15-性能与已知上限)。
 
 ---
 
-## 3. Install the toolchain
+## 3. 安装工具链
 
 ```bash
 python -m pip install --upgrade platformio
 ```
 
-PlatformIO will download the `espressif32` platform, the Arduino-ESP32
-framework and the toolchain on the first build. That download is large
-(hundreds of MB); give it time on a slow link.
+首次构建时，PlatformIO 会下载 `espressif32` platform、Arduino-ESP32 framework
+和工具链。这个下载很大（数百 MB），网络慢请耐心等待。
 
-> On a very slow connection, `tools/fetch_pio_framework.js` can pull the
-> framework tarball directly into PlatformIO's cache using several parallel
-> range requests. See [The tools directory](#14-the-tools-directory).
+> 网络很慢时，可以用 `tools/fetch_pio_framework.js` 通过多条并行 HTTP range
+> 请求直接把 framework tarball 拉进 PlatformIO 的缓存。见
+> [tools 目录](#14-tools-目录)。
 
 ---
 
-## 4. Build
+## 4. 构建
 
-The firmware lives in the subdirectory `3.98/merged-adblock-epd/`. The
-default PlatformIO environment is `s2mini`.
+固件位于子目录 `3.98/merged-adblock-epd/`，默认 PlatformIO 环境为 `s2mini`。
 
 ```bash
 python -m platformio run -d 3.98/merged-adblock-epd
 ```
 
-A successful build ends with something like:
+成功构建以类似下面的输出结尾：
 
 ```
 RAM:   [==        ]  25.0% (used ... bytes from 327680 bytes)
@@ -132,30 +128,30 @@ Flash: [========= ]  87.3% (used ... bytes from 1179648 bytes)
 ========================= [SUCCESS] =========================
 ```
 
-The build outputs land in `3.98/merged-adblock-epd/.pio/build/s2mini/`:
+产物位于 `3.98/merged-adblock-epd/.pio/build/s2mini/`：
 
-| File | Purpose |
+| 文件 | 用途 |
 |---|---|
-| `firmware.bin` | the application |
-| `bootloader.bin` | second-stage bootloader |
+| `firmware.bin` | 应用程序 |
+| `bootloader.bin` | 二级 bootloader |
 | `partitions.bin` | partition table |
-| `firmware.elf` / `.map` | debug symbols / memory map |
+| `firmware.elf` / `.map` | 调试符号 / 内存映射 |
 
-**Flash budget.** The image sits at ~87% of the 1.125 MB OTA slot. There
-is room to grow but not a lot — watch the number after big changes.
+**flash 预算。** 镜像约占 1.125 MB OTA slot 的 **87%**。还有增长空间，但不大
+——大改动后请留意这个数字。
 
 ---
 
-## 5. Flash
+## 5. 烧写
 
-### Option A — normal upload (app + filesystem)
+### 方式 A — 常规上传（app + 文件系统）
 
 ```bash
 python -m platformio run -d 3.98/merged-adblock-epd -t upload      # app
 python -m platformio run -d 3.98/merged-adblock-epd -t uploadfs    # LittleFS (blocklist)
 ```
 
-### Option B — one merged image at 0x0
+### 方式 B — 合成单个镜像，从 0x0 烧写
 
 ```bash
 python -m platformio run -d 3.98/merged-adblock-epd -t buildfs
@@ -164,36 +160,31 @@ esptool.py --chip esp32s2 --port COMx write_flash 0x0 \
     3.98/merged-adblock-epd/firmware-merged.bin
 ```
 
-See [Building a merged release image](#13-building-a-merged-release-image).
+见 [构建合成发行镜像](#13-构建合成发行镜像)。
 
-### About the flaky first upload
+### 关于首次 upload 失败
 
-On boards whose console is the chip's **native USB CDC** (no UART bridge),
-`upload` fails on the first attempt almost every time with
-`OSError(22, 'device does not support the request')` — the port disappears
-while the chip re-enumerates. **Just run it again**; it succeeds the second
-time.
+在控制台走芯片**原生 USB CDC**（无 UART 桥）的板子上，`upload` 几乎每次都会
+在第一次失败，报 `OSError(22, 'device does not support the request')`——芯片
+重新枚举时端口会消失。**再跑一次即可**，第二次就成功。
 
-`tools/flash_and_capture.ps1` (Windows) automates this retry loop *and*
-captures the serial console:
+`tools/flash_and_capture.ps1`（Windows）会自动重试，并抓取串口控制台：
 
 ```powershell
 powershell -File 3.98/merged-adblock-epd/tools/flash_and_capture.ps1 -Port COM3 -CaptureSec 45
 ```
 
-Add `-SkipBuild` to flash without rebuilding.
+加 `-SkipBuild` 可跳过重新构建直接烧写。
 
-> **Reading the native-USB console needs DTR *and* RTS asserted.** The
-> ESP32-S2's USB CDC only reports "connected" when both are high. Many
-> serial tools leave them low by default, which silently drops every byte
-> the device sends. The capture script sets both for you.
+> **读取原生 USB 控制台需要同时拉高 DTR 和 RTS。** ESP32-S2 的 USB CDC 只有在
+> 两者都置位时才报告 "connected"。很多串口工具默认把它们拉低，于是设备发出的
+> 每个字节都被静默丢弃。抓取脚本已替你置位。
 
 ---
 
-## 6. First boot: read the password
+## 6. 首次启动：读取密码
 
-Open the serial console at **115200** baud. On every boot the device prints
-its admin credentials:
+以 **115200** 波特率打开串口控制台。每次启动设备都会打印管理员凭据：
 
 ```
 AdBlock EPD booting (reset=3 heap=144544 psram=2095103)
@@ -207,183 +198,167 @@ AdBlock EPD booting (reset=3 heap=144544 psram=2095103)
 [HB] up 23s ip 192.168.10.190 wl 3 boot 3 dom 103366 bl 128KB q 0 blk 0/0 top - 0 heap 86016 ps 1948939
 ```
 
-* `[AUTH] created ...` → fresh device, a new password was generated.
-* `[AUTH] admin account: ...` → existing password, re-printed.
-* `[HB]` repeats every 5 s: uptime, IP, domain count, blocked/total, top
-  domain, free heap and PSRAM. If `ip offline` appears, it is not on the
-  network yet.
+* `[AUTH] created ...` → 全新设备，已生成新密码。
+* `[AUTH] admin account: ...` → 已有密码，重新打印。
+* `[HB]` 每 5 s 重复一次：uptime、IP、域名数、blocked/total、Top 域名、
+  free heap 与 PSRAM。若出现 `ip offline`，说明它还没上网。
 
-**Write the password down.** It is the login for the web console
-(`admin` / that password). It is printed every boot on purpose: the console
-is behind Basic Auth, so a password shown only once would be unrecoverable
-without erasing the device — and the serial port is already physical access.
+**把密码记下来。** 它是 Web 控制台的登录凭据（`admin` / 该密码）。密码每次
+启动都打印是**有意**的：控制台在 Basic Auth 后面，若只显示一次，忘记后就只能
+抹掉设备才能恢复——而串口本就是物理接触设备的方式。
 
 ---
 
-## 7. Put it on the network
+## 7. 接入网络
 
-Credentials are tried in this order; the first that exists wins:
+凭据按以下顺序尝试，第一个存在的胜出：
 
-1. **`/wifi.cfg`** on LittleFS — written by the setup portal.
-2. **`secrets.h`** (`WIFI_SSID` / `WIFI_PASS`) — unless still the shipped
-   placeholders.
-3. **The ESP-IDF NVS store** — whatever a previous firmware saved.
+1. **`/wifi.cfg`**（LittleFS）——由 setup portal 写入。
+2. **`secrets.h`**（`WIFI_SSID` / `WIFI_PASS`）——除非仍是出厂占位符。
+3. **ESP-IDF 的 NVS 存储**——之前固件保存的网络。
 
-If none work, the device opens an open access point named
-**`AdBlock-Setup`** and paints a "配网模式" screen; the console log shows:
+若都不可用，设备会开启一个名为 **`AdBlock-Setup`** 的开放接入点，并绘制
+「配网模式」画面；控制台日志显示：
 
 ```
 [WIFI] no credentials in /wifi.cfg, secrets.h or NVS
 [SETUP] AP AdBlock-Setup open at http://192.168.4.1/
 ```
 
-### Joining via the setup portal
+### 通过 setup portal 入网
 
-1. On your phone/laptop, connect to WiFi **`AdBlock-Setup`** (no password).
-2. Browse to **`http://192.168.4.1/`**.
-3. Enter your WiFi name and password, save.
-4. The device writes `/wifi.cfg`, restarts as a station and joins.
+1. 用手机 / 电脑连接 WiFi **`AdBlock-Setup`**（无密码）。
+2. 浏览器打开 **`http://192.168.4.1/`**。
+3. 填 WiFi 名称与密码，保存。
+4. 设备写入 `/wifi.cfg`，重启为 station 并加入网络。
 
-### Getting back into the portal later
+### 之后如何再进 portal
 
-Once connected, the portal is not reachable by IP anymore. Three ways back:
+连上网络后，portal 就不能再用 IP 访问了。三种回去的方式：
 
-* **Hold the BOOT button for 3 s** — reopens `AdBlock-Setup` immediately
-  (a *short* press just repaints the dashboard).
-* From the console's **网络** card: save `/setwifi` → the device restarts
-  onto the new network.
-* **Do nothing** — if the link drops, the firmware retries every 30 s and
-  reopens the portal automatically after **6 consecutive failures** (about
-  3 minutes).
+* **按住 BOOT 键 3 s** —— 立即重新开启 `AdBlock-Setup`（**短按**只是重绘
+  仪表盘）。
+* 在控制台的 **网络** 卡片：保存 `/setwifi` → 设备重启并连到新网络。
+* **什么都不做** —— 若链路掉线，固件每 30 s 重试，连续 **6 次**失败后
+  （约 3 分钟）自动重开 portal。
 
-> The portal runs the device in AP mode, so DNS blocking is paused until
-> you finish configuring it.
+> portal 会让设备进入 AP 模式，因此在你配好之前 DNS 拦截会暂停。
 
 ---
 
-## 8. Point clients at it
+## 8. 把客户端指向它
 
-The device is a plain DNS server on port 53 (UDP + TCP). Two ways to use it:
+设备就是端口 53 上的普通 DNS 服务器（UDP + TCP）。两种用法：
 
-**Best — whole network:** set it as the upstream DNS in your router:
+**推荐 —— 整个网络：** 把它设为路由器的上游 DNS：
 
 ```
-primary DNS   -> the device IP (e.g. 192.168.10.190)
-secondary DNS -> anything that is NOT a second sinkhole
+primary DNS   -> 设备 IP (例如 192.168.10.190)
+secondary DNS -> 任意一台「非」sinkhole 的 DNS
 ```
 
-**Per-client:** set just the devices you care about to use the device IP.
+**单客户端：** 只把你关心的设备指向该设备 IP。
 
-The device does **not** run DHCP, so it never has to be the gateway — only
-the resolver. Blocked queries come back as `0.0.0.0` / `::`; everything
-else is the real answer forwarded from `9.9.9.9`.
+设备**不**运行 DHCP，因此它不必是网关——只需作 resolver。被拦截的查询返回
+`0.0.0.0` / `::`；其余则是从 `9.9.9.9` 转发回来的真实答案。
 
 ---
 
-## 9. The web console
+## 9. Web 控制台
 
-Browse to `http://adblock.local/` (mDNS) or the IP on the panel header.
-The whole UI is in Chinese by design and self-contained (no CDN).
+浏览器访问 `http://adblock.local/`（mDNS）或面板头部显示的 IP。整个 UI 按
+设计是中文的，且自包含（无 CDN）。
 
-**Cards**
+**卡片**
 
-| Card | What it does |
+| 卡片 | 作用 |
 |---|---|
-| 顶部磁贴 | today's blocked, today's queries, block rate, all-time blocked, rule count, free heap, RSSI, chip temperature |
-| 每小时拦截 | last 24 h histogram of blocked queries |
-| 域名排行榜 | top blocked domains today |
-| 客户端 | per-client IP/MAC, blocked/allowed, ban toggle |
-| 自定义拦截域名 | add / remove specific domains |
-| 规则更新 | remote blocklist URL + auto-update interval, or upload a `.bin` |
-| 设备 | uptime, Bloom filter, pending queries, totals, **立即刷新屏幕** |
-| 网络 | change WiFi |
-| 管理员密码 | change the `admin` password |
+| 顶部磁贴 | 今日拦截、今日查询、拦截率、累计拦截、规则数量、free heap、RSSI、芯片温度 |
+| 每小时拦截 | 最近 24 h 被拦截查询的直方图 |
+| 域名排行榜 | 今日 Top 被拦截域名 |
+| 客户端 | 每个客户端的 IP/MAC、blocked/allowed、ban 切换 |
+| 自定义拦截域名 | 添加 / 删除指定域名 |
+| 规则更新 | 远程 blocklist URL + 自动更新间隔，或上传 `.bin` |
+| 设备 | uptime、Bloom filter、pending 查询、累计值、**立即刷新屏幕** |
+| 网络 | 修改 WiFi |
+| 管理员密码 | 修改 `admin` 密码 |
 
-**Auth model.** Basic Auth (`admin` + your password) plus a CSRF `token`
-returned by `/stats` and required on every mutating call. The page fetches
-`/stats` every 5 s.
-
----
-
-## 10. The e-paper dashboard
-
-The panel does a full four-colour refresh **every 3 minutes**
-(`DASH_REFRESH_MS`). Each refresh takes ~17 s end to end, but it runs in
-the background so DNS keeps answering (see
-[Architecture notes](#17-architecture-notes)).
-
-It shows:
-
-* today's blocked count as a large number, with total queries and rate;
-* a 24-bar per-hour histogram;
-* the top blocked domains with hit counts;
-* a footer with all-time totals, uptime and last-update time.
-
-**Manual refresh:** the console's **立即刷新屏幕** button, or a **short
-press** of the BOOT button.
-
-You can preview the layout on a PC without flashing, via
-`node 3.98/merged-adblock-epd/tools/preview_dashboard.js` →
-`preview-dashboard.png`.
+**认证模型。** Basic Auth（`admin` + 你的密码）加上一个 CSRF `token`；token
+由 `/stats` 返回，每次写操作都必须带上。页面每 5 s 拉取一次 `/stats`。
 
 ---
 
-## 11. Changing the admin password
+## 10. 电子纸仪表盘
 
-Console card **管理员密码**:
+面板**每 3 分钟**做一次四色全刷（`DASH_REFRESH_MS`）。每次刷新端到端约 17 s，
+但在后台运行，因此 DNS 持续应答（见 [架构说明](#17-架构说明)）。
 
-1. Type the new password twice (6–64 chars, printable ASCII, no spaces).
-2. Click 修改密码.
+显示内容：
 
-The device validates it, writes `/auth.cfg`, and logs the change. Your
-browser then re-prompts for credentials on the next request — log in with
-the new password.
+* 今日拦截数（大号数字），以及总查询数与拦截率；
+* 24 条每小时直方图；
+* Top 被拦截域名及其命中数；
+* 页脚：累计值、uptime 与最后更新时间。
 
-**Forgot it?** It is printed on every boot on the serial console. To force
-a brand-new one, erase `/auth.cfg` from LittleFS (or reflash a merged image
-that has no `/auth.cfg`).
+**手动刷新：** 控制台的 **立即刷新屏幕** 按钮，或**短按** BOOT 键。
+
+不用烧写也能在 PC 上预览版式：`node 3.98/merged-adblock-epd/tools/preview_dashboard.js`
+→ `preview-dashboard.png`。
 
 ---
 
-## 12. Blocklist: updating and customising
+## 11. 修改管理员密码
 
-### Rebuilding from source lists
+控制台的 **管理员密码** 卡片：
+
+1. 两次输入新密码（6–64 个字符，可打印 ASCII，不含空格）。
+2. 点「修改密码」。
+
+设备会校验、写入 `/auth.cfg` 并记录日志。浏览器在下一个请求会被重新要求登录
+——用新密码登录即可。
+
+**忘记了？** 它在每次启动时都打印在串口控制台。要强制生成全新的，抹掉 LittleFS
+上的 `/auth.cfg`（或重新烧写一个不含 `/auth.cfg` 的合成镜像）。
+
+---
+
+## 12. blocklist：更新与定制
+
+### 从源列表重建
 
 ```bash
 cd 3.98/merged-adblock-epd
-python tools/build_blocklist.py data/blocklist.bin          # StevenBlack + Hagezi Light
-python tools/build_blocklist.py data/blocklist.bin a.txt b.txt   # your own lists/URLs
+python tools/build_blocklist.py data/blocklist.bin           # StevenBlack + Hagezi Light
+python tools/build_blocklist.py data/blocklist.bin a.txt b.txt   # 你自己的列表/URL
 ```
 
-Options:
+选项：
 
-| Flag | Meaning |
+| 参数 | 含义 |
 |---|---|
-| `--bloom-bits N` | Bloom filter size in bits (default 1,048,576 = 128 KB) |
-| `--no-bloom` | skip the Bloom filter |
+| `--bloom-bits N` | Bloom filter 位数（默认 1,048,576 = 128 KB） |
+| `--no-bloom` | 跳过 Bloom filter |
 
-The format is fixed: 20-byte header + Bloom filter + sorted 40-bit hashes,
-magic `CADB`, `HASH_BYTES = 5`. It is byte-compatible with the upstream
-project.
+格式固定：20-byte header + Bloom filter + 排序后的 40-bit 哈希，magic `CADB`、
+`HASH_BYTES = 5`。与上游项目**字节兼容**。
 
-### Uploading a list
+### 上传列表
 
-* **From the PC:** `pio run -t uploadfs` with `blocklist.bin` in `data/`,
-  or use the console's 规则更新 card to upload a `.bin`.
-* **Remote auto-update:** host your `.bin` somewhere and set the URL in the
-  console; the device re-downloads on the interval you choose.
+* **从 PC：** 把 `blocklist.bin` 放进 `data/` 后 `pio run -t uploadfs`，或用
+  控制台的 规则更新 卡片上传 `.bin`。
+* **远程自动更新：** 把你的 `.bin` 托管到某处并在控制台填 URL；设备会按你选的
+  间隔重新下载。
 
-### Custom single domains
+### 自定义单个域名
 
-Add them in the 自定义拦截域名 card. They are stored in `/custom.txt` and
-survive reboots.
+在 自定义拦截域名 卡片里添加。它们存于 `/custom.txt`，重启后保留。
 
 ---
 
-## 13. Building a merged release image
+## 13. 构建合成发行镜像
 
-A merged image is a single file flashed at `0x0` — handy for ESP Web Tools,
-`esptool-js`, or handing to someone else.
+合成镜像是一整块从 `0x0` 烧写的单文件——方便 ESP Web Tools、`esptool-js`，
+或交给他人。
 
 ```bash
 python -m platformio run -d 3.98/merged-adblock-epd -t buildfs
@@ -391,128 +366,119 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 # -> 3.98/merged-adblock-epd/firmware-merged.bin
 ```
 
-It bundles, at the offsets the board uses:
+它按板子使用的偏移打包：
 
-| Offset | Content |
+| 偏移 | 内容 |
 |---|---|
 | `0x1000` | `bootloader.bin` |
 | `0x8000` | `partitions.bin` |
 | `0xE000` | `boot_app0.bin` |
 | `0x10000` | `firmware.bin` |
-| `0x250000` | `littlefs.bin` (the blocklist) |
+| `0x250000` | `littlefs.bin`（blocklist） |
 
-> **`-t buildfs` matters.** Without it, `make_release.py` still runs but
-> leaves the filesystem out (it prints `(absent: run 'pio run -t buildfs'
-> ...)`), and the flashed device blocks nothing and shows an empty
-> dashboard. Pass `--no-fs` only if you deliberately want that.
+> **`-t buildfs` 很重要。** 没有它，`make_release.py` 仍会运行，但会漏掉文件
+> 系统（打印 `(absent: run 'pio run -t buildfs' ...)`），烧出来的设备拦不住
+> 任何东西、仪表盘也是空的。只有在你**故意**想要那样时才加 `--no-fs`。
 
-**Prebuilt merged images** are on the
-[Releases](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases)
-page.
+**预编译合成镜像**在
+[Releases](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases) 页面。
 
 ---
 
-## 14. The tools directory
+## 14. tools 目录
 
-`3.98/merged-adblock-epd/tools/` — all run offline from the repo root.
+`3.98/merged-adblock-epd/tools/` —— 全部可在仓库根目录离线运行。
 
-| Tool | What it does |
+| 工具 | 作用 |
 |---|---|
-| `build_blocklist.py` | compile source lists → `blocklist.bin` |
-| `test_build_blocklist.py` | unit tests for the blocklist builder |
-| `make_release.py` | merge build outputs → `firmware-merged.bin` |
-| `gen_cjk_font.py` | rasterise the Chinese glyph table from SimHei |
-| `check_font.js` | report UI characters missing from the glyph table |
-| `preview_dashboard.js` | render `preview-dashboard.png` without flashing |
-| `flash_and_capture.ps1` | flash with retry + capture the serial console (Windows) |
-| `fetch_pio_framework.js` | fetch the framework tarball over parallel range requests |
-| `probe_flash.ps1` / `read_part.ps1` | read flash partitions back |
+| `build_blocklist.py` | 编译源列表 → `blocklist.bin` |
+| `test_build_blocklist.py` | blocklist 构建器的单元测试 |
+| `make_release.py` | 合并构建产物 → `firmware-merged.bin` |
+| `gen_cjk_font.py` | 从 SimHei 栅格化中文点阵字体表 |
+| `check_font.js` | 报告 UI 中缺失于字体表的字符 |
+| `preview_dashboard.js` | 不烧写即渲染 `preview-dashboard.png` |
+| `flash_and_capture.ps1` | 带重试的烧写 + 抓串口控制台（Windows） |
+| `fetch_pio_framework.js` | 通过并行 range 请求拉取 framework tarball |
+| `probe_flash.ps1` / `read_part.ps1` | 回读 flash 分区 |
 
-Note `gen_cjk_font.py` expects **SimHei** (`simhei.ttf`, ships with
-Windows); override with the `CJK_FONT` environment variable on other hosts.
+注意 `gen_cjk_font.py` 需要 **SimHei**（`simhei.ttf`，Windows 自带）；在其他
+系统上用 `CJK_FONT` 环境变量覆盖。
 
 ---
 
-## 15. Performance and known limits
+## 15. 性能与已知上限
 
-**Latency** (measured on hardware, single queries):
+**延迟**（硬件实测，单条查询）：
 
-| Query type | p50 | p90 |
+| 查询类型 | p50 | p90 |
 |---|---|---|
-| blocked (local) | ~22 ms | ~28 ms |
-| forwarded (upstream) | ~245 ms | ~255 ms |
+| blocked（本地） | ~22 ms | ~28 ms |
+| forwarded（上游） | ~245 ms | ~255 ms |
 | NXDOMAIN | ~246 ms | ~263 ms |
 
-**Throughput.** A household resolver sees single-digit qps and is lossless.
-Sustained load starts to bite near 100 qps:
+**吞吐。** 家用 resolver 是个位数 qps，无损。持续负载在接近 100 qps 时开始
+出现问题：
 
-| Offered rate | Loss |
+| 提供速率 | 丢包 |
 |---|---|
 | ≤ 50 qps | 0% |
 | ~100 qps | ~44% |
 | ~200 qps | ~77% |
 | ~300 qps | ~87% |
 
-The limit is a **single-burst ceiling of about six datagrams** — lwIP's UDP
-receive mailbox depth (`CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6`, compiled into
-the prebuilt `liblwip.a`). Spacing queries 10 ms apart recovers almost all
-of them. This is a **documented, accepted limit**, not a bug: see the
-"burst ceiling" entry in
-[`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md) for the full reasoning and
-why a `parsePacket()` drain loop does not help.
+该上限是**单次突发约 6 个数据报的硬天花板**——lwIP 的 UDP 接收邮箱深度
+（`CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6`，编译进预制的 `liblwip.a`）。把查询间隔
+拉开到 10 ms 几乎可全部收回。这是**已记录、已接受的上限**，不是 bug：完整推理
+与「为何 `parsePacket()` 排空循环无济于事」见
+[`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md) 的 "burst ceiling" 条目。
 
-**Panel refresh.** A frame is two very different costs: ~1.4 s to stream the
-bits, then **~15 s** for the panel to move its pigments. The firmware splits
-these so the ~15 s runs in the background; that is why the `refresh=` field
-in the `[EPD]` log line is the panel **health check** (~15 s = a real
-refresh; a few ms = the update was silently not accepted).
+**面板刷新。** 一帧包含两种截然不同的耗时：传输比特约 1.4 s，之后**约 15 s**
+供面板移动色素。固件把两者拆开，让那 ~15 s 在后台运行；这就是为什么 `[EPD]`
+日志行里的 `refresh=` 字段是面板的**健康检查**（~15 s = 真刷新；几毫秒 =
+更新其实没被接受）。
 
-**Why SPI is bit-banged.** A brief experiment with the hardware SPI
-peripheral made frames look ~35× faster while refreshing nothing — the 15 s
-belongs to the panel, not the bus. Bit-banging was kept on purpose.
+**为什么用 bit-bang SPI。** 曾短暂尝试硬件 SPI 外设，帧看似快了 ~35×，实际
+什么都没刷新——那 15 s 属于面板，不属于总线。因此**有意**保留 bit-bang。
 
 ---
 
-## 16. Troubleshooting
+## 16. 故障排查
 
-| Symptom | Cause / fix |
+| 现象 | 原因 / 处理 |
 |---|---|
-| First `upload` fails with `OSError(22)` | Native USB re-enumeration. **Run it again** (or use `flash_and_capture.ps1`). |
-| Serial console prints nothing | Native-USB CDC needs **DTR and RTS** asserted. Use `flash_and_capture.ps1`, or set both in your terminal. |
-| `[HB] ... ip offline` | Not on the network. Join `AdBlock-Setup` and configure WiFi, or hold BOOT 3 s to reopen the portal. |
-| Blank / stale picture, `refresh=` a few ms | The panel update was not accepted. Re-check wiring (esp. BUSY on GPIO 4) and power. |
-| Picture shredded / mirrored | A band-window or rotation transform broke. Only draw via `drawTextColor()` / `fillRectColor()`, and derive each row's window from its **data row** — see `AGENTS.md`. |
-| Panel never seems to update | Four-colour refresh takes ~15 s and flashes; give it time. |
-| `pio` download stalls | Use `tools/fetch_pio_framework.js` or retry on a better link. |
-| Console 401 after a reflash | A merged image has no `/auth.cfg`, so a fresh password was generated — read the serial log. |
-| Whole network loses DNS | The device is down or off-network; your router should have a non-sinkhole secondary. |
-| Chinese text shows as blank boxes | A glyph is missing from `cjk_font.cpp`. Run `node tools/check_font.js`, regenerate with `gen_cjk_font.py`. |
+| 首次 `upload` 报 `OSError(22)` | 原生 USB 重新枚举。**再跑一次**（或用 `flash_and_capture.ps1`）。 |
+| 串口控制台无输出 | 原生 USB CDC 需要同时拉高 **DTR 和 RTS**。用 `flash_and_capture.ps1`，或在终端里都置位。 |
+| `[HB] ... ip offline` | 没上网。连 `AdBlock-Setup` 配置 WiFi，或按住 BOOT 3 s 重开 portal。 |
+| 画面空白 / 陈旧，`refresh=` 只有几毫秒 | 面板更新未被接受。检查接线（尤其 BUSY 在 GPIO 4）与供电。 |
+| 画面被撕裂 / 镜像 | band-window 或旋转变换被破坏。只能通过 `drawTextColor()` / `fillRectColor()` 绘制，且每行的 window 必须由其**数据行**推导——见 `AGENTS.md`。 |
+| 面板似乎一直不更新 | 四色全刷要 ~15 s 且会闪烁；给它时间。 |
+| `pio` 下载卡住 | 用 `tools/fetch_pio_framework.js`，或换个好网络重试。 |
+| 重新烧写后控制台 401 | 合成镜像没有 `/auth.cfg`，已生成新密码——读串口日志。 |
+| 整个网络失去 DNS | 设备宕机或掉线；路由器应配置一个非 sinkhole 的备用 DNS。 |
+| 中文显示成空白方框 | `cjk_font.cpp` 缺字。跑 `node tools/check_font.js`，再用 `gen_cjk_font.py` 重新生成。 |
 
 ---
 
-## 17. Architecture notes
+## 17. 架构说明
 
-These are the rules the firmware is built on; full detail is in
-[`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md).
+以下是固件赖以成立的规则；完整细节见
+[`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md)。
 
-* **No full-frame buffer.** 768×552 at 2 bpp is 105,984 bytes — it does not
-  fit in the S2's 176 KB DRAM alongside WiFi. The picture is never
-  materialised: `epdSendFrame()` renders and streams it **one 64-row band at
-  a time** into a 12,288-byte static buffer.
-* **Never block `loop()`.** After a frame is streamed the glass holds BUSY
-  for ~15 s; `epdSendFrame()` returns first and `loop()` drives
-  `epdServiceRefresh()` so DNS keeps answering.
-* **Two cancelling rotation transforms.** `drawTextColor()` /
-  `fillRectColor()` apply one; `epdRowData()` applies the other. Draw only
-  through the helpers, never index `colorBuf` directly.
-* **Windows come from data rows**, never a running counter — see the
-  `0x83` window mapping in `epd_driver.cpp`.
-* **PSRAM is used on purpose** for the 128 KB Bloom filter; hot per-query
-  state stays in DRAM.
-* **The hot DNS path allocates nothing** — `trackerRecord()` uses no
-  `String`, no `malloc`, no logging.
+* **没有全帧缓冲。** 768×552 @ 2 bpp 为 105,984 字节——在 S2 的 176 KB DRAM
+  （还要与 WiFi 共享）里放不下。画面从不整体物化：`epdSendFrame()` 一次渲染
+  并流式发送**一个 64 行的 band**，写入 12,288 字节的静态缓冲。
+* **绝不阻塞 `loop()`。** 一帧发完后玻璃会把 BUSY 拉低约 15 s；先让
+  `epdSendFrame()` 返回，由 `loop()` 驱动 `epdServiceRefresh()`，DNS 才能持续
+  应答。
+* **两个相互抵消的旋转变换。** `drawTextColor()` / `fillRectColor()` 应用其一，
+  `epdRowData()` 应用其二。只能通过 helper 绘制，**绝不要**直接索引 `colorBuf`。
+* **window 由数据行推导**，绝不用运行计数器——见 `epd_driver.cpp` 里的 `0x83`
+  window 映射。
+* **PSRAM 是刻意使用的**（128 KB Bloom filter）；每次查询的热状态留在 DRAM。
+* **DNS 热路径不分配内存**——`trackerRecord()` 不用 `String`、不 `malloc`、
+  不打日志。
 
 ---
 
-*Questions or fixes: open an issue on the
-[issue tracker](https://github.com/youkum/esp32s2-mini-epaper-adblock/issues).*
+*问题或修复：请在
+[issue tracker](https://github.com/youkum/esp32s2-mini-epaper-adblock/issues) 提 issue。*

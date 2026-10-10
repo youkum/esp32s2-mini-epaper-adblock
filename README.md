@@ -1,78 +1,74 @@
 # esp32s2-mini-epaper-adblock
 
-**English** | [简体中文](README.zh-CN.md)
+**简体中文** | [English](README.en.md)
 
-An **ESP32-S2 mini** turned into a self-contained **DNS ad-blocker** whose
-statistics are painted on a **7.5" four-colour e-paper "magic" panel**
-(768×552, JDY79668 / GDEY075Z08 class). No cloud, no phone app, no account:
-one board, one screen, one power cable, and a network that stops showing
-ads.
+把一块 **ESP32-S2 mini** 变成自成一体的 **DNS 广告拦截器**，统计信息绘制在
+**7.5 英寸四色电子纸「魔法屏」**（768×552，JDY79668 / GDEY075Z08 class）上。
+没有云、没有手机 App、没有账号：一块主板、一块屏、一根电源线，让整个网络
+不再显示广告。
 
-The panel refreshes every three minutes and shows what the device itself
-blocked — today's total, the block rate, a per-hour histogram and the top
-domains — while the DNS engine keeps answering queries in the background.
-Everything else (per-client stats, custom rules, ban lists, blocklist
-updates, OTA, password) lives in a built-in Chinese web console served
-straight from the firmware.
+面板每 3 分钟刷新一次，显示设备自己拦截到的数据——今日拦截数、拦截率、
+每小时直方图与 Top 域名；与此同时 DNS 引擎在后台持续应答查询。其余功能
+（按客户端的统计、自定义规则、封禁列表、blocklist 更新、OTA、密码）都在
+固件自带的中文 Web 控制台里。
 
-> **This is a pure AI-built project.** The entire codebase — firmware,
-> e-paper driver, web console, build tooling and documentation — was
-> written end-to-end by an AI coding agent under human direction, and was
-> verified on real hardware at every step. See
-> [AI-built declaration](#ai-built-declaration) below. It also stands on
-> two MIT-licensed open-source projects; see [Credits](#credits).
+> **这是一个纯 AI 构建的项目。** 整个代码库——固件、电子纸驱动、Web 控制台、
+> 构建工具与文档——均由 AI 编码代理在人类指导下端到端编写，并在每一步都用
+> 真实硬件验证。详见下方的 [AI 构建声明](#ai-构建声明)。同时它建立在两个
+> MIT 许可的开源项目之上，详见 [开源署名](#基于开源构建署名)。
 
 ---
 
-## Table of contents
+## 目录
 
-- [What it does](#what-it-does)
-- [Hardware](#hardware)
-- [Quick start](#quick-start)
-- [Detailed guide](GUIDE.md) — full build, flash, first-boot, console, blocklist and troubleshooting walkthrough
-- [Downloads / releases](#downloads--releases)
-- [Built on open source (credits)](#built-on-open-source-credits)
-- [AI-built declaration](#ai-built-declaration)
-- [Repository layout](#repository-layout)
-- [License](#license)
+- [它做什么](#它做什么)
+- [硬件](#硬件)
+- [快速开始](#快速开始)
+- [详细指南](GUIDE.md) — 完整的构建、烧写、首次启动、控制台、blocklist 与故障排查教程
+- [下载 / 发行版](#下载--发行版)
+- [基于开源构建（署名）](#基于开源构建署名)
+- [AI 构建声明](#ai-构建声明)
+- [仓库布局](#仓库布局)
+- [许可](#许可)
+
+> **阅读约定**：本文为中文说明，但**信号名、GPIO 编号、接口名、命令、路径、
+> 标识符等技术术语一律保留英文原文**，以免翻译造成歧义或误操作。例如
+> `EPD DC` 不译作「直流」，`EPD BUSY` 不译作「繁忙」，`Board` 不译作
+> 「董事会」，`MIT` 不译作「麻省理工学院」。
 
 ---
 
-## What it does
+## 它做什么
 
-* **DNS sinkhole on port 53** (UDP **and** TCP). Blocked domains answer
-  `0.0.0.0` (A) / `::` (AAAA); everything else is forwarded to `9.9.9.9`
-  asynchronously.
-* **Blocklist in flash**: a sorted 40-bit FNV-1a hash table, pre-filtered
-  by a 128 KB Bloom filter allocated in PSRAM. The format (magic `CADB`,
-  `HASH_BYTES = 5`) is byte-compatible with the upstream
+* **端口 53 上的 DNS sinkhole**（UDP **与** TCP 双栈）。被拦截域名返回
+  `0.0.0.0`（A） / `::`（AAAA）；其余查询异步转发到 `9.9.9.9`。
+* **blocklist 存于 flash**：排序后的 40-bit FNV-1a 哈希表，先用分配在
+  PSRAM 中的 128 KB Bloom filter 预过滤。其格式（magic `CADB`、
+  `HASH_BYTES = 5`）与上游
   [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/ESP32-C3-AdBlocker)
-  project. The shipped list is ~103,000 domains.
-* **Per-client tracking**: IP, MAC, blocked/allowed counters, ban/unban.
-* **A self-contained web console** (Basic Auth + CSRF, no CDN, no external
-  assets): live tiles, an hourly chart, the top-domain table, per-client
-  rows, custom-domain chips, blocklist auto-update URL, firmware/blocklist
-  upload, an **admin-password change** form and a "refresh the screen now"
-  button.
-* **E-paper dashboard, refreshed every 3 minutes**: today's blocked count,
-  total queries and block rate, a 24-bar histogram, the top blocked
-  domains, and a footer with all-time totals and uptime.
-* **WiFi setup that recovers itself**: on power-up it tries `/wifi.cfg`,
-  then `secrets.h`, then the ESP-IDF NVS store; if all fail it opens an
-  `AdBlock-Setup` access point. If it drops off the network at runtime it
-  retries every 30 s and, after six failures, reopens that portal by
-  itself. Holding the BOOT button for 3 s also reopens it on demand.
-* **OTA** firmware update and **mDNS** (`adblock.local`).
+  项目**字节兼容**。随固件附带的列表约 **103,000** 个域名。
+* **按客户端追踪**：IP、MAC、blocked/allowed 计数、ban/unban。
+* **自包含的 Web 控制台**（Basic Auth + CSRF，无 CDN、无外部资源）：
+  实时数据块、每小时图表、Top 域名表、按客户端的行、自定义域名 chips、
+  blocklist 自动更新 URL、固件 / blocklist 上传、**管理员密码修改**表单，
+  以及「立即刷新屏幕」按钮。
+* **电子纸仪表盘，每 3 分钟刷新**：今日拦截数、总查询数与拦截率、
+  24 条每小时直方图、Top 被拦截域名，以及含累计值与 uptime 的页脚。
+* **可自恢复的 WiFi 配置**：开机时依次尝试 `/wifi.cfg`、`secrets.h`、
+  再是 ESP-IDF 的 NVS 存储；全部失败则开启 `AdBlock-Setup` 接入点。
+  若运行中掉线，每 30 s 重试一次，连续 6 次失败后自动重新开启该门户。
+  按住 **BOOT** 键 3 s 也可随时手动重新开启。
+* **OTA** 固件升级与 **mDNS**（`adblock.local`）。
 
-## Hardware
+## 硬件
 
-| Part | Detail |
+| 部分 | 说明 |
 |---|---|
-| Board | ESP32-S2 mini, verified on **ESP32-S2FNR2** — 4 MB flash + 2 MB PSRAM |
-| Panel | 7.5" 768×552 **four-colour** e-paper, JDY79668 / GDEY075Z08 class |
-| Wiring | see the pin table in the [detailed guide](GUIDE.md#wiring) |
+| Board | ESP32-S2 mini，已在 **ESP32-S2FNR2** 上验证 — 4 MB flash + 2 MB PSRAM |
+| Panel | 7.5 英寸 768×552 **四色**电子纸，JDY79668 / GDEY075Z08 class |
+| 接线 | 见 [详细指南](GUIDE.md#2-接线) 中的引脚表 |
 
-| Signal | GPIO |
+| 信号 | GPIO |
 |---|---|
 | EPD MOSI | 11 |
 | EPD SCK | 7 |
@@ -84,106 +80,101 @@ straight from the firmware.
 | Config button | 0 (BOOT) |
 | Status LED | 15 |
 
-## Quick start
+## 快速开始
 
 ```bash
-# 1. build (PlatformIO)
+# 1. 构建 (PlatformIO)
 python -m pip install --upgrade platformio
 python -m platformio run -d 3.98/merged-adblock-epd
 
-# 2. flash the app + filesystem
+# 2. 烧写 app + 文件系统
 python -m platformio run -d 3.98/merged-adblock-epd -t upload
 python -m platformio run -d 3.98/merged-adblock-epd -t uploadfs
 
-# 3. or build one merged image and flash it at 0x0
+# 3. 或者合成单个镜像，从 0x0 烧写
 python -m platformio run -d 3.98/merged-adblock-epd -t buildfs
 python 3.98/merged-adblock-epd/tools/make_release.py
 esptool.py --chip esp32s2 write_flash 0x0 3.98/merged-adblock-epd/firmware-merged.bin
 ```
 
-Open the serial console at **115200** baud to read the admin password
-(printed on every boot). Then browse to `http://adblock.local/` (or the IP
-shown on the panel) and log in as **`admin`**.
+以 **115200** 波特率打开串口控制台读取管理员密码（每次启动都会打印）。
+然后浏览器访问 `http://adblock.local/`（或面板上显示的 IP），
+用 **`admin`** 登录。
 
-**Full walkthrough → [GUIDE.md](GUIDE.md).**
+**完整教程 → [GUIDE.md](GUIDE.md)。**
 
-## Downloads / releases
+## 下载 / 发行版
 
-Prebuilt **merged firmware** images (`firmware-merged.bin`, flashed at
-offset `0x0`) are attached to the
+预编译的**合成固件镜像**（`firmware-merged.bin`，从偏移 `0x0` 烧写）附在
 [**Releases**](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases)
-page. A merged image bundles bootloader + partition table + application +
-LittleFS (with the blocklist), so one file gives you a device that actually
-blocks something.
+页面。合成镜像打包了 bootloader + partition table + 应用程序 + LittleFS
+（含 blocklist），所以一个文件就能得到一台真正能拦截的设备。
 
-> A freshly flashed merged image has **no `/auth.cfg`**, so the device
-> generates a new random admin password on first boot — read it from the
-> serial console.
+> 全新烧写的合成镜像**没有 `/auth.cfg`**，因此设备首次启动会生成一个新的
+> 随机管理员密码——从串口控制台读取。
 
-## Built on open source (credits)
+## 基于开源构建（署名）
 
-This project is a **derivative work**. Two MIT-licensed projects carry most
-of the heavy lifting, and they are credited here, in
-[CREDITS.md](CREDITS.md), and in the source headers:
+本项目是**衍生作品**。两个 MIT 许可的项目承担了大部分底层工作，在此、
+在 [CREDITS.md](CREDITS.md) 中以及源码头部均有署名：
 
-* **DNS engine** — [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/ESP32-C3-AdBlocker)
-  (MIT, © 2026 zed): the blocking DNS server, the 40-bit FNV-1a hash
-  blocklist format, the Bloom pre-filter and the async upstream forwarding.
-* **E-paper renderer** — [datascale-ai/inksight](https://github.com/datascale-ai/inksight)
-  (InkSight / 墨鱼, MIT, © 2026 datascale-ai): the four-colour panel driver,
-  drawing primitives and the ESP32-S2 mini pin profile.
+* **DNS 引擎** — [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/ESP32-C3-AdBlocker)
+  （MIT，© 2026 zed）：拦截用 DNS 服务器、40-bit FNV-1a 哈希 blocklist
+  格式、Bloom 预过滤与异步上游转发。
+* **电子纸渲染器** — [datascale-ai/inksight](https://github.com/datascale-ai/inksight)
+  （InkSight / 墨鱼，MIT，© 2026 datascale-ai）：四色面板驱动、绘图原语，
+  以及 ESP32-S2 mini 引脚配置。
 
-Also used: **PlatformIO**, **Arduino-ESP32**, **ESP-IDF** (incl. lwIP),
-**esptool**, **Node.js**, and the **StevenBlack/hosts** + **hagezi/dns-blocklists**
-data lists. Full breakdown, including what was deliberately *not* reused,
-is in [CREDITS.md](CREDITS.md).
+另使用：**PlatformIO**、**Arduino-ESP32**、**ESP-IDF**（含 lwIP）、
+**esptool**、**Node.js**，以及 **StevenBlack/hosts** + **hagezi/dns-blocklists**
+数据列表。完整清单（包括刻意**未**复用的部分）见 [CREDITS.md](CREDITS.md)。
 
-## AI-built declaration
+## AI 构建声明
 
-**This is a pure AI project.** Every line of firmware, driver, web console,
-build script and document in this repository was produced by an AI coding
-agent (Trae / Claude-class model) working from human instructions. There
-was no pre-existing codebase that a human wrote for this device and then
-handed over; the agent read the two upstream projects, designed the merge,
-wrote the code, built it, flashed it and verified it against an actual
-ESP32-S2 mini and panel.
+**这是一个纯 AI 项目。** 本仓库中的每一行固件、驱动、Web 控制台、构建脚本
+与文档，都由 AI 编码代理（Trae / Claude 类模型）在人类指令下生成。这里没有
+一段"人类为这台设备写好、再交给 AI"的既有代码：代理先阅读两个上游项目，
+设计合并方案，编写代码，然后构建、烧写，并在真实的 ESP32-S2 mini 与面板上
+逐项验证。
 
-What that means in practice:
+这意味着：
 
-* **Verification is real, not assumed.** The merge rule is: nothing counts
-  as working until it is seen on the hardware. Examples that were caught
-  only by measurement, not by reading the code — a hardware-SPI path that
-  looked 35× faster but silently refreshed nothing; a band-window counter
-  bug that shredded the picture while the logs reported a healthy refresh;
-  and the UDP receive-mailbox ceiling documented in
-  [`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md).
-* **Known limits are written down, not hidden.** See the "burst ceiling"
-  section in [AGENTS.md](3.98/merged-adblock-epd/AGENTS.md) and the
-  *Throughput* section of the [firmware README](3.98/merged-adblock-epd/README.md#throughput-and-the-burst-ceiling).
-* **You should still review before trusting it.** It drives a mains-powered
-  device on your network. Read the source; the agent's constraints and
-  reasoning are recorded in [`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md).
+* **验证是实测的，不是假定的。** 合并的原则是：没在硬件上看到，就不算通过。
+  几个只有靠测量（而非读代码）才能发现的例子：一条硬件 SPI 路径看似快了
+  35×，实际却什么都没刷新；一个 band-window 计数错误把画面撕成两半，而日志
+  仍报告刷新正常；以及 [`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md) 中
+  记录的 UDP 接收邮箱上限。
+* **已知限制是写下来的，不是藏起来的。** 见
+  [AGENTS.md](3.98/merged-adblock-epd/AGENTS.md) 的 "burst ceiling" 一节，
+  以及固件 [README](3.98/merged-adblock-epd/README.md#throughput-and-the-burst-ceiling)
+  的 *Throughput* 一节。
+* **信任之前请自行审阅。** 它会驱动一台接入你网络的、市电供电的设备。
+  请阅读源码；代理的约束与推理都记录在
+  [`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md) 中。
 
-## Repository layout
+## 仓库布局
 
 ```
 .
-├── 3.98/merged-adblock-epd/        ← the firmware project
-│   ├── src/                         firmware sources
-│   ├── tools/                        build / font / release / flash helpers
-│   ├── data/blocklist.bin            compiled blocklist image
-│   ├── partitions.csv                flash layout
-│   ├── platformio.ini                build config (env: s2mini)
-│   ├── README.md                     firmware technical deep-dive
-│   └── AGENTS.md                     engineering constraints & invariants
-├── docs/agents/                      AI-agent workflow docs (issue tracker, triage, domains)
-├── GUIDE.md                          detailed step-by-step guide
-├── CREDITS.md                        open-source attribution
-├── LICENSE                           MIT (+ upstream notices)
-└── AGENTS.md                         repo-level agent policy
+├── 3.98/merged-adblock-epd/        ← 固件项目
+│   ├── src/                         固件源码
+│   ├── tools/                       构建 / 字体 / 发布 / 烧写辅助脚本
+│   ├── data/blocklist.bin           编译后的 blocklist 镜像
+│   ├── partitions.csv               flash 分区布局
+│   ├── platformio.ini               构建配置 (env: s2mini)
+│   ├── README.md                    固件技术深入说明
+│   └── AGENTS.md                    工程约束与不变量
+├── docs/agents/                     AI-agent 工作流文档 (issue tracker, triage, domains)
+├── README.md                        仓库首页 (简体中文, 本文件)
+├── README.en.md                     仓库首页 (English)
+├── GUIDE.md                         详细指南 (简体中文)
+├── GUIDE.en.md                      详细指南 (English)
+├── CREDITS.md                       开源署名
+├── LICENSE                          MIT (+ 上游声明)
+└── AGENTS.md                        仓库级 agent 策略
 ```
 
-## License
+## 许可
 
-MIT — see [LICENSE](LICENSE). The upstream components are also MIT; their
-notices are reproduced in [CREDITS.md](CREDITS.md).
+MIT — 见 [LICENSE](LICENSE)。上游组件同样是 MIT；其声明转载于
+[CREDITS.md](CREDITS.md)。
