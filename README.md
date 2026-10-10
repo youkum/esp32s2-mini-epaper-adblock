@@ -1,5 +1,7 @@
 # esp32s2-mini-epaper-adblock
 
+**English** | [简体中文](README.zh-CN.md)
+
 An **ESP32-S2 mini** turned into a self-contained **DNS ad-blocker** whose
 statistics are painted on a **7.5" four-colour e-paper "magic" panel**
 (768×552, JDY79668 / GDEY075Z08 class). No cloud, no phone app, no account:

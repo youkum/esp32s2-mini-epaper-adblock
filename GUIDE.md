@@ -1,5 +1,7 @@
 # Detailed Guide
 
+**English** | [简体中文](GUIDE.zh-CN.md)
+
 A complete, start-to-finish walkthrough for building, flashing, configuring
 and troubleshooting the **esp32s2-mini-epaper-adblock** firmware.
 
