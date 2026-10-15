@@ -8,11 +8,11 @@
 extern uint32_t deviceUptimeSec();
 extern const char* deviceIpStr();
 
-// ── Screen selection ─────────────────────────────────────────
-// epdSendFrame() paints the panel band by band and asks us to fill
-// each band. One renderer draws the statistics dashboard, another draws
-// a plain message screen; both write through the same clipped canvas
-// helpers, so each call is a complete redraw of that band.
+// ── 屏幕选择 ──────────────────────────────────────────────────────
+// epdSendFrame() 逐 band 绘制面板，并回调我们填充每一个 band。
+// 一个渲染器绘制统计仪表盘，另一个绘制纯消息屏；二者都通过
+// 同一组带裁剪的 canvas 辅助函数写入，因此每次调用都是对该
+// band 的完整重绘。
 
 enum Screen { SCREEN_DASHBOARD, SCREEN_MESSAGE };
 static Screen s_screen = SCREEN_DASHBOARD;
@@ -27,22 +27,21 @@ static void paintBand(int rBase, int rows, uint8_t* buf) {
   else                              renderMessage();
 }
 
-// Streams a complete frame and returns while the panel is still moving the
-// pigments; main loop() calls epdServiceRefresh() to finish it off, so the
-// ~15 s the glass needs do not stop the DNS engine answering queries.
+// 流式发出完整一帧后立即返回，此时面板仍在迁移颜料；主 loop()
+// 会调用 epdServiceRefresh() 完成收尾，因此玻璃面板所需的
+// 约 15 s 不会妨碍 DNS 引擎应答查询。
 static void flushScreen() {
   uint32_t ms = epdSendFrame(paintBand);
   Serial.printf("[DASH] frame streamed in %lu ms, panel refreshing\n",
                 (unsigned long)ms);
 }
 
-// ── Layout grid ──────────────────────────────────────────────
-// One grid for the whole screen. Everything is expressed in these
-// constants so the rules, the two columns and the footer all land on the
-// same edges.
+// ── 布局网格 ───────────────────────────────────────────────────────────
+// 整屏共用一套网格。所有位置都用这些常量表达，使分隔线、
+// 左右两列与页脚都落在同一条边上。
 //
 //   +--------------------------------------------------+
-//   | ADBLOCK DNS                          <device ip> |  black header
+//   | ADBLOCK DNS                          <device ip> |  黑色页眉
 //   |                                                  |
 //   |  今日拦截                 每小时拦截             |
 //   |  1,234                    [ 24-bar histogram ]   |
@@ -58,21 +57,21 @@ static void flushScreen() {
 
 static const int PAD           = 24;
 static const int HEADER_H      = 48;
-static const int COL_L_X       = 24;                    // left column
+static const int COL_L_X       = 24;                    // 左列
 static const int COL_L_W       = 320;                   // 24 .. 344
-static const int COL_R_X       = 400;                   // right column
+static const int COL_R_X       = 400;                   // 右列
 static const int COL_R_W       = W - COL_R_X - PAD;     // 400 .. 744
-static const int SECTION_Y     = 68;                    // section captions
-static const int RULE_TOP_Y    = 176;                   // rule under the figures
-static const int RULE_MID_Y    = 278;                   // rule above the list
+static const int SECTION_Y     = 68;                    // 区块标题行
+static const int RULE_TOP_Y    = 176;                   // 数字下方的分隔线
+static const int RULE_MID_Y    = 278;                   // 列表上方的分隔线
 static const int LIST_TITLE_Y  = 294;
 static const int LIST_Y0       = 334;
 static const int LIST_PITCH    = 30;
-static const int LIST_ROWS     = 5;                     // rows per column (10 total)
+static const int LIST_ROWS     = 5;                     // 每列行数（共 10 行）
 static const int FOOTER_RULE_Y = 500;
 static const int FOOTER_Y      = 512;
 
-// ── Text helpers ─────────────────────────────────────────────
+// ── 文本辅助函数 ──────────────────────────────────────────────────────
 
 static void textCentered(const char* msg, int y, int scale, uint8_t color) {
   int x = (W - textWidthUtf8(msg, scale)) / 2;
@@ -80,16 +79,16 @@ static void textCentered(const char* msg, int y, int scale, uint8_t color) {
   drawTextColor(msg, x, y, scale, color);
 }
 
-// Right-align an ASCII run against a fixed right edge.
+// 将一段 ASCII 文本按固定右边缘右对齐。
 static void textRight(const char* msg, int right, int y, int scale, uint8_t color) {
   int x = right - textWidth(strlen(msg), scale);
   if (x < 0) x = 0;
   drawTextColor(msg, x, y, scale, color);
 }
 
-// Section caption with a small solid tab to its left. The tab gives the
-// screen the grouping that plain text on white cannot: at 16 px per Chinese
-// glyph an e-paper panel has no other way to show hierarchy.
+// 区块标题，左侧带一个小实心色块。这个色块提供了白底纯文字
+// 无法表达的分组感：在中文字形宽 16 px 的 E-Paper 面板上，
+// 除此之外没有别的办法体现层级。
 static void sectionTitle(int x, int y, const char* text) {
   fillRectColor(x, y + 8, 6, 16, COLOR_BLACK);
   drawTextColor(text, x + 16, y, 2, COLOR_BLACK);
@@ -99,7 +98,7 @@ static void hRule(int x, int y, int w) {
   fillRectColor(x, y, w, 2, COLOR_BLACK);
 }
 
-// Comma-grouped integer, e.g. 1234567 -> "1,234,567".
+// 千分位分组的整数，例如 1234567 -> "1,234,567"。
 static void fmtGrouped(uint32_t v, char* out, size_t outLen) {
   char raw[16];
   snprintf(raw, sizeof(raw), "%lu", (unsigned long)v);
@@ -112,12 +111,11 @@ static void fmtGrouped(uint32_t v, char* out, size_t outLen) {
   out[o] = 0;
 }
 
-// ── Header ───────────────────────────────────────────────────
+// ── 页眉 ───────────────────────────────────────────────────────────────────
 
-// The panel own address is the one thing a user needs off the glass: it
-// is what they type into a phone to reach the dashboard, and what they point
-// their DNS at. It is therefore right-aligned on the black bar in white,
-// which is the highest contrast the panel can produce.
+// 面板自身地址是用户最需要从屏上拿走的信息：既是在手机上输入
+// 以访问仪表盘的地址，也是要把 DNS 指向的地址。因此它以白色
+// 右对齐显示在黑色横条上——这是面板所能呈现的最高对比度。
 static void drawHeader() {
   fillRectColor(0, 0, W, HEADER_H, COLOR_BLACK);
   drawTextColor("ADBLOCK DNS", 20, 17, 2, COLOR_WHITE);
@@ -126,7 +124,7 @@ static void drawHeader() {
   textRight(ip, W - 20, 17, 2, COLOR_WHITE);
 }
 
-// ── Today figures ────────────────────────────────────────────
+// ── 今日数据 ────────────────────────────────────────────────────────
 
 static void drawToday() {
   char buf[24];
@@ -151,11 +149,10 @@ static void drawToday() {
   textRight(buf, COL_L_X + COL_L_W, 240, 3, COLOR_BLACK);
 }
 
-// ── Hourly bar strip ─────────────────────────────────────────
+// ── 每小时柱状条 ─────────────────────────────────────────────────
 
-// 24 slots across the right column, sitting on a single axis rule that lines
-// up with the rule under the day figures. Every bar is solid black, so the
-// strip reads as one silhouette.
+// 右列横向 24 个槽位，落在一条轴线上，与今日数字下方的分隔线
+// 对齐。每根柱子都是纯黑实心，因此整条读起来是一个剪影。
 static void drawHourly() {
   sectionTitle(COL_R_X, SECTION_Y, "每小时拦截");
 
@@ -183,10 +180,9 @@ static void drawHourly() {
   textRight("23", COL_R_X + COL_R_W, axisY + 6, 1, COLOR_BLACK);
 }
 
-// ── Top-blocked list ─────────────────────────────────────────
+// ── 拦截最多的域名列表 ──────────────────────────────────────────
 
-// One caption, ten rows across two columns: the panel is 768 px wide and a
-// single column of five would leave half of it empty.
+// 一个标题、十行分两列：面板宽 768 px，单列只放五行会空出一半。
 static void drawTopList() {
   sectionTitle(COL_L_X, LIST_TITLE_Y, "域名排行榜");
 
@@ -201,7 +197,7 @@ static void drawTopList() {
   for (int i = 0; i < LIST_ROWS * 2; i++) {
     if (!t[i].domain[0] || t[i].count == 0) continue;
 
-    const int col = i / LIST_ROWS;          // 0 = left column, 1 = right
+    const int col = i / LIST_ROWS;          // 0 = 左列, 1 = 右列
     const int row = i % LIST_ROWS;
     const int x0  = col ? COL_R_X : COL_L_X;
     const int w   = col ? COL_R_W : COL_L_W;
@@ -215,7 +211,7 @@ static void drawTopList() {
     fmtGrouped(t[i].count, cnt, sizeof(cnt));
     textRight(cnt, x0 + w, y, 2, COLOR_BLACK);
 
-    // The name gets whatever is left between the rank gutter and the count.
+    // 域名占用排名槽位与计数之间剩余的全部宽度。
     char name[64];
     strncpy(name, t[i].domain, sizeof(name) - 1);
     name[sizeof(name) - 1] = 0;
@@ -227,7 +223,7 @@ static void drawTopList() {
   }
 }
 
-// ── Footer ───────────────────────────────────────────────────
+// ── 页脚 ───────────────────────────────────────────────────────────────────
 
 static void drawFooter() {
   hRule(COL_L_X, FOOTER_RULE_Y, W - 2 * PAD);
@@ -256,7 +252,7 @@ static void drawFooter() {
   drawTextColor(line, x, FOOTER_Y, 2, COLOR_BLACK);
 }
 
-// ── Renderers ────────────────────────────────────────────────
+// ── 渲染器 ──────────────────────────────────────────────────────────────
 
 static void renderDashboard() {
   drawHeader();

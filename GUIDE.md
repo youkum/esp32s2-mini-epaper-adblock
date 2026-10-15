@@ -1,6 +1,6 @@
 # 详细指南
 
-**简体中文** | [English](GUIDE.en.md)
+**简体中文**
 
 **ESP32-S2 mini 四色电子纸 DNS 广告拦截器**固件从零到跑通的完整步骤：
 构建、烧写、配置与故障排查。
@@ -10,8 +10,7 @@
 
 > **阅读约定**：本文为中文说明，但**信号名、GPIO 编号、接口名、命令、路径、
 > 标识符等技术术语一律保留英文原文**，以免翻译造成歧义。例如 `EPD DC`
-> 不译作「直流」、`EPD BUSY` 不译作「繁忙」、`Board` 不译作「董事会」、
-> `MIT` 不译作「麻省理工学院」、`trunk` 不译作「树干」。
+> 不译作「直流」、`EPD BUSY` 不译作「繁忙」、`MIT` 不译作「麻省理工学院」。
 >
 > **AI 构建项目。** 本文内容由 AI 代理编写并在真实硬件上验证。信任前请先阅读
 > [AI 构建声明](README.md#ai-构建声明)。
@@ -73,7 +72,7 @@
 按下表把面板接到 ESP32-S2 mini。这些引脚沿用了 InkSight 的 S2 配置，固定在
 [`src/config.h`](3.98/merged-adblock-epd/src/config.h) 中。
 
-| Panel pin | ESP32-S2 mini GPIO | 说明 |
+| 面板引脚 | ESP32-S2 mini GPIO | 说明 |
 |---|---|---|
 | MOSI / DIN | **11** | bit-bang，任意 GPIO 均可 |
 | SCK / CLK | **7** | |
@@ -81,16 +80,16 @@
 | DC | **17** | data/command |
 | RST | **16** | |
 | BUSY | **4** | 刷新期间面板会拉低此脚 |
-| VCC | 3V3 | 请对照你面板的 datasheet |
+| VCC | 3V3 | 请对照你面板的数据手册 |
 | GND | GND | 共地 |
 
 板载引脚：
 
 | 功能 | GPIO |
 |---|---|
-| Battery ADC | 6 |
-| Config button | 0 (BOOT) |
-| Status LED | 15 |
+| 电池 ADC | 6 |
+| 配置按键 | 0 (BOOT) |
+| 状态 LED | 15 |
 
 > **切勿**把面板改接到硬件 SPI 外设上。本固件是**刻意**用 bit-bang 驱动 SPI
 > 的——原因见 [性能与已知上限](#15-性能与已知上限)。
@@ -147,8 +146,8 @@ Flash: [========= ]  87.3% (used ... bytes from 1179648 bytes)
 ### 方式 A — 常规上传（app + 文件系统）
 
 ```bash
-python -m platformio run -d 3.98/merged-adblock-epd -t upload      # app
-python -m platformio run -d 3.98/merged-adblock-epd -t uploadfs    # LittleFS (blocklist)
+python -m platformio run -d 3.98/merged-adblock-epd -t upload      # 应用程序
+python -m platformio run -d 3.98/merged-adblock-epd -t uploadfs    # LittleFS（blocklist）
 ```
 
 ### 方式 B — 合成单个镜像，从 0x0 烧写

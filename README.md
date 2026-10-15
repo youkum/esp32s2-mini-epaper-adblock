@@ -1,6 +1,6 @@
 # esp32s2-mini-epaper-adblock
 
-**简体中文** | [English](README.en.md)
+**简体中文**
 
 把一块 **ESP32-S2 mini** 变成自成一体的 **DNS 广告拦截器**，统计信息绘制在
 **7.5 英寸四色电子纸「魔法屏」**（768×552，JDY79668 / GDEY075Z08 class）上。
@@ -33,8 +33,8 @@
 
 > **阅读约定**：本文为中文说明，但**信号名、GPIO 编号、接口名、命令、路径、
 > 标识符等技术术语一律保留英文原文**，以免翻译造成歧义或误操作。例如
-> `EPD DC` 不译作「直流」，`EPD BUSY` 不译作「繁忙」，`Board` 不译作
-> 「董事会」，`MIT` 不译作「麻省理工学院」。
+> `EPD DC` 不译作「直流」，`EPD BUSY` 不译作「繁忙」，`MIT` 不译作
+> 「麻省理工学院」。
 
 ---
 
@@ -64,8 +64,8 @@
 
 | 部分 | 说明 |
 |---|---|
-| Board | ESP32-S2 mini，已在 **ESP32-S2FNR2** 上验证 — 4 MB flash + 2 MB PSRAM |
-| Panel | 7.5 英寸 768×552 **四色**电子纸，JDY79668 / GDEY075Z08 class |
+| 开发板 | ESP32-S2 mini，已在 **ESP32-S2FNR2** 上验证 — 4 MB flash + 2 MB PSRAM |
+| 面板 | 7.5 英寸 768×552 **四色**电子纸，JDY79668 / GDEY075Z08 class |
 | 接线 | 见 [详细指南](GUIDE.md#2-接线) 中的引脚表 |
 
 | 信号 | GPIO |
@@ -76,9 +76,9 @@
 | EPD DC | 17 |
 | EPD RST | 16 |
 | EPD BUSY | 4 |
-| Battery ADC | 6 |
-| Config button | 0 (BOOT) |
-| Status LED | 15 |
+| 电池 ADC | 6 |
+| 配置按键 | 0 (BOOT) |
+| 状态 LED | 15 |
 
 ## 快速开始
 
@@ -146,8 +146,7 @@ esptool.py --chip esp32s2 write_flash 0x0 3.98/merged-adblock-epd/firmware-merge
   记录的 UDP 接收邮箱上限。
 * **已知限制是写下来的，不是藏起来的。** 见
   [AGENTS.md](3.98/merged-adblock-epd/AGENTS.md) 的 "burst ceiling" 一节，
-  以及固件 [README](3.98/merged-adblock-epd/README.md#throughput-and-the-burst-ceiling)
-  的 *Throughput* 一节。
+  以及[详细指南](GUIDE.md#15-性能与已知上限)的性能一节。
 * **信任之前请自行审阅。** 它会驱动一台接入你网络的、市电供电的设备。
   请阅读源码；代理的约束与推理都记录在
   [`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md) 中。
@@ -166,9 +165,7 @@ esptool.py --chip esp32s2 write_flash 0x0 3.98/merged-adblock-epd/firmware-merge
 │   └── AGENTS.md                    工程约束与不变量
 ├── docs/agents/                     AI-agent 工作流文档 (issue tracker, triage, domains)
 ├── README.md                        仓库首页 (简体中文, 本文件)
-├── README.en.md                     仓库首页 (English)
 ├── GUIDE.md                         详细指南 (简体中文)
-├── GUIDE.en.md                      详细指南 (English)
 ├── CREDITS.md                       开源署名
 ├── LICENSE                          MIT (+ 上游声明)
 └── AGENTS.md                        仓库级 agent 策略

@@ -1,15 +1,14 @@
-// AdBlock DNS sinkhole + four-colour e-paper dashboard
+// AdBlock DNS sinkhole + 四色电子纸仪表盘
 //
-// ESP32-S2 mini, 768x552 JDY79668 panel.
+// ESP32-S2 mini，768x552 JDY79668 面板。
 //
-// The DNS engine is 9M2PJU's ESP32-C3 AdBlocker: sorted 40-bit FNV-1a
-// hashes in flash, binary-searched, with a RAM Bloom pre-filter.
-// The renderer is InkSight's e-paper driver and font.
+// DNS 引擎来自 9M2PJU 的 ESP32-C3 AdBlocker：flash 中存有排序好的
+// 40-bit FNV-1a 哈希，二分查找，外加一个 RAM Bloom 预过滤器。
+// 渲染部分来自 InkSight 的电子纸驱动与字体。
 //
-// Everything InkSight did over the network (modes, LLM content, the
-// cloud backend) is gone. The panel now shows what the sinkhole itself
-// counted: blocked queries today, block rate, a per-hour histogram and
-// the most-blocked domains.
+// InkSight 原来走网络的一切（各种模式、LLM 内容、云后端）都已移除。
+// 面板现在展示的是 sinkhole 自己统计出来的数据：今日拦截的查询数、
+// 拦截率、按小时的直方图以及被拦截最多的域名。
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -26,8 +25,8 @@
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
 #include "esp_heap_caps.h"
-#include "esp_system.h"        // esp_reset_reason()
-#include "esp_wifi.h"          // esp_wifi_get_config(), for the NVS credentials fallback
+#include "esp_system.h"        // 提供 esp_reset_reason()
+#include "esp_wifi.h"          // 提供 esp_wifi_get_config()，用于 NVS 凭据回退
 
 #include "config.h"
 #include "display.h"
@@ -37,7 +36,7 @@
 #include "secrets.h"
 #include "dashboard_html.h"
 
-// ---- config ----
+// ---- 配置 ----
 static const IPAddress UPSTREAM(9, 9, 9, 9);
 static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
@@ -52,7 +51,7 @@ static const uint32_t UPSTREAM_TIMEOUT_MS = 2000;
 static const uint32_t REMOTE_FETCH_IDLE_MS = 3000;
 static const char* DASHBOARD_ETAG = "adblk-console-v3";
 
-// ---- logging ----
+// ---- 日志 ----
 #ifdef NDEBUG
 #define LOG(...) ((void)0)
 #define LOGN(...) ((void)0)
@@ -61,13 +60,13 @@ static const char* DASHBOARD_ETAG = "adblk-console-v3";
 #define LOGN(...) Serial.println(__VA_ARGS__)
 #endif
 
-// ---- banded canvas ----
-// colorBuf points at the band epd_driver is currently streaming; the
-// drawing helpers in display.cpp clip to it, so the 105,984-byte full
-// canvas is never allocated anywhere.
+// ---- 分带画布 ----
+// colorBuf 指向 epd_driver 当前正在流式输出的那个分带；display.cpp 中的
+// 绘图辅助函数都以它为裁剪边界，因此 105,984 字节的完整画布
+// 在任何地方都不会被分配。
 uint8_t* colorBuf = nullptr;
 
-// ---- forward declarations ----
+// ---- 前向声明 ----
 WebServer web(80);
 static const char* COLLECTED_HEADERS[] = {"Authorization", "If-None-Match", "Origin", "Referer"};
 String updateUrl, updateStatus = "never";
@@ -76,13 +75,13 @@ uint32_t updateIntervalH = 24, lastCheckMs = 0;
 static uint32_t lastDnsActivityMs = 0;
 static bool fetchBlocklist(String url);
 
-// Captured once in setup(); reported in the heartbeat so a spontaneous
-// reboot can be told apart from a flash/OTA reset without a UART probe.
+// 在 setup() 中一次性捕获；随心跳上报，这样无需接 UART 探针就能把
+// 自发重启与 flash/OTA 复位区分开来。
 static uint8_t g_bootReason = 0;
 
-// The RTC timer keeps running across a software reset, so millis() can start
-// in the thousands of seconds after a reset or an OTA. Uptime is therefore
-// reported relative to the first millis() seen in setup().
+// RTC 定时器在软件复位之后仍在继续计时，因此复位或 OTA 后
+// millis() 的起点可能已经是几千秒。所以运行时长以 setup() 中
+// 首次读到的 millis() 为基准上报。
 static uint32_t g_bootMillis = 0;
 
 uint32_t deviceUptimeSec() { return (millis() - g_bootMillis) / 1000; }
@@ -93,7 +92,7 @@ const char* deviceIpStr() {
   return s;
 }
 
-// ---- hashing ----
+// ---- 哈希 ----
 static uint64_t fnv64(const char* s, size_t n) {
   uint64_t h = 0xcbf29ce484222325ULL;
   for (size_t i = 0; i < n; i++) { h ^= (uint8_t)s[i]; h *= 0x100000001b3ULL; }
@@ -101,7 +100,7 @@ static uint64_t fnv64(const char* s, size_t n) {
 }
 static inline uint64_t fnv40(const char* s, size_t n) { return fnv64(s, n) & HASH_MASK; }
 
-// ---- blocklist (flash hash table + RAM bloom filter) ----
+// ---- 黑名单（flash 哈希表 + RAM Bloom 过滤器）----
 static const uint8_t BL_MAGIC[4] = {'C','A','D','B'};
 static const uint8_t BL_VERSION = 1;
 static const int BL_HEADER_SIZE = 20;
@@ -143,7 +142,7 @@ static bool inFlash(uint64_t h) {
   return false;
 }
 
-// ---- custom domains ----
+// ---- 自定义域名 ----
 String customDom[MAX_CUSTOM];
 uint64_t customHash[MAX_CUSTOM];
 int numCustom = 0;
@@ -184,7 +183,7 @@ static bool isBlocked(const char* domain, size_t dlen) {
   }
   return false;
 }
-// ---- persistence: custom domains ----
+// ---- 持久化：自定义域名 ----
 static void loadCustom() {
   numCustom = 0;
   File f = LittleFS.open("/custom.txt", "r");
@@ -229,7 +228,7 @@ static void removeCustom(String d) {
   }
 }
 
-// ---- banned IPs ----
+// ---- 已封禁 IP ----
 uint32_t bannedIP[MAX_BAN]; int numBanned = 0;
 static bool isBannedIP(uint32_t ip) { for (int i = 0; i < numBanned; i++) if (bannedIP[i] == ip) return true; return false; }
 static bool addBannedIP(uint32_t ip) {
@@ -263,7 +262,7 @@ static void saveBanned() {
   f.close();
 }
 
-// ---- client table ----
+// ---- 客户端表 ----
 struct Dev { uint32_t ip; uint8_t mac[6]; uint32_t blocked, allowed, lastSeen; bool banned; };
 Dev clients[MAX_CLIENTS]; int numClients = 0;
 uint32_t totalBlocked = 0, totalAllowed = 0;
@@ -294,7 +293,7 @@ static Dev* getClient(uint32_t ip) {
   return c;
 }
 
-// ---- DNS parsing ----
+// ---- DNS 解析 ----
 static size_t parseQuery(const uint8_t* pkt, int len, char* out, uint16_t* qtype, int* qend) {
   if (len < 13) return 0;
   int i = 12; size_t o = 0;
@@ -330,7 +329,7 @@ static int buildBlocked(uint8_t* pkt, int qend, uint16_t qtype) {
   }
   return qend;
 }
-// ---- async DNS forwarding ----
+// ---- 异步 DNS 转发 ----
 WiFiUDP dnsServer;
 WiFiUDP upstream;
 WiFiUDP tcpUpstream;
@@ -345,18 +344,16 @@ struct Pending {
 Pending pending[MAX_PENDING];
 int pendingCount = 0;
 
-// Handle a small batch of datagrams per pass, on both the client socket
-// (handleDns) and the upstream socket (pollUpstream). This does NOT raise
-// the burst ceiling: the SDK's lwIP UDP receive mailbox is only
-// CONFIG_LWIP_UDP_RECVMBOX_SIZE (6) deep, so a client that fires a page's
-// worth of lookups at once overflows it and lwIP drops the surplus before
-// the loop is ever entered - draining faster cannot recover what was
-// already discarded (measured: three different query types, with wildly
-// different processing costs, all cap at the same ~6 of 20; see the burst
-// ceiling note in AGENTS.md). What the batch does buy is latency: each
-// pass empties whatever is currently queued instead of handing back one
-// datagram per loop turn. The cap stays small so one busy moment cannot
-// starve the web server, OTA and the panel service that share this loop.
+// 每轮在客户端套接字（handleDns）和上游套接字（pollUpstream）上各
+// 处理一小批数据报。这并不会抬高突发上限：SDK 的 lwIP UDP 接收邮箱
+// 只有 CONFIG_LWIP_UDP_RECVMBOX_SIZE（6）深，客户端一次性发出一整页
+// 的查询就会把它灌满，多余的数据报在循环还没开始处理之前就被 lwIP
+// 丢弃了——排空得再快也救不回已经丢掉的部分（实测：三种处理开销
+// 截然不同的查询类型，20 个都同样只能到达约 6 个；参见 AGENTS.md
+// 中的突发上限说明）。批量处理买到的是延迟：每一轮把当前排队的
+// 全部清空，而不是 loop() 每转一圈只取一个数据报。上限保持得很小，
+// 这样某个繁忙瞬间不会饿死共享这个 loop() 的 web 服务器、OTA 和
+// 面板服务。
 static const int DNS_DRAIN_MAX = 8;
 
 static int findFreeSlot() {
@@ -372,12 +369,11 @@ static void expirePending() {
     }
 }
 static void pollUpstream(uint8_t* buf, int bufSize) {
-  // Drain a small batch: the upstream socket shares the same 6-deep lwIP
-  // receive mailbox as the client socket, so when a forwarded batch comes
-  // back together, handling one reply per loop() pass overflows it and the
-  // extra replies are dropped (the client then waits out the timeout).
-  // Bounded like the client drain so one busy moment cannot starve the
-  // web server, OTA and the panel service.
+  // 排空一小批：上游套接字与客户端套接字共用同一个深度为 6 的
+  // lwIP 接收邮箱，因此当转发出去的一批一起返回时，每轮 loop()
+  // 只处理一条应答就会把它灌满，多余的应答会被丢弃（客户端只能
+  // 干等到超时）。与客户端排空一样设有上限，这样某个繁忙瞬间
+  // 不会饿死 web 服务器、OTA 和面板服务。
   for (int i = 0; i < DNS_DRAIN_MAX; i++) {
     int sz = upstream.parsePacket();
     if (sz <= 0) return;
@@ -397,7 +393,7 @@ static void pollUpstream(uint8_t* buf, int bufSize) {
 
 static uint8_t dnsBuf[DNS_BUF_SIZE];
 
-// Handle exactly one datagram. Returns false when the mailbox is empty.
+// 只处理一个数据报。邮箱为空时返回 false。
 static bool serveOneDns() {
   int sz = dnsServer.parsePacket();
   if (sz <= 0) return false;
@@ -440,8 +436,8 @@ static bool serveOneDns() {
     if (c) c->allowed++;
   }
 
-  // Feed the dashboard. Only name-bearing queries are counted, so a
-  // malformed packet cannot skew the statistics.
+  // 喂给仪表盘。只有带域名的查询才计入统计，这样畸形包就
+  // 无法扭曲统计数字。
   if (dl) trackerRecord(domain, blocked);
   return true;
 }
@@ -453,19 +449,16 @@ static void handleDns() {
 }
 
 // ---- TCP DNS ----
-// Served as a non-blocking state machine. A TCP DNS client, or a slow
-// upstream, must never stall loop(): answering everything inline used to
-// cost up to two UPSTREAM_TIMEOUT_MS windows of delay(1) spins - one
-// waiting for the request body and one waiting for the upstream reply -
-// which froze the panel service, the web console and UDP DNS for that
-// whole time. This handler now advances one step per pass and yields in
-// between, exactly like epdServiceRefresh() does for the panel.
+// 以非阻塞状态机方式服务。TCP DNS 客户端或缓慢的上游绝不能卡住
+// loop()：过去全部内联应答的做法最多要耗费两个 UPSTREAM_TIMEOUT_MS
+// 窗口的 delay(1) 空转——一个等请求体，一个等上游应答——期间面板
+// 服务、web 控制台和 UDP DNS 全都冻结。现在这个处理器每轮只前进一步，
+// 步与步之间让出控制权，与 epdServiceRefresh() 服务面板的方式完全一致。
 //
-// One connection is served at a time, and each carries one query, which
-// is what the previous implementation did too (it called stop() after
-// every reply). The upstream reply for a forwarded query carries the
-// sentinel ID 0xFFFE, which cannot collide with the UDP path's pending
-// slots (0..MAX_PENDING-1) because that path uses a different socket.
+// 一次只服务一条连接，且每条连接只承载一个查询，这与上一个实现的
+// 行为相同（它在每次应答后都会调用 stop()）。被转发查询的上游应答
+// 带着哨兵 ID 0xFFFE，它不会与 UDP 路径的 pending 槽位
+// （0..MAX_PENDING-1）冲突，因为那条路径使用的是另一个套接字。
 WiFiServer tcpDnsServer(DNS_PORT);
 WiFiClient tcpDnsClient;
 static uint8_t tcpBuf[DNS_BUF_SIZE];
@@ -487,8 +480,8 @@ static void tcpDnsReset() {
   tcpGot    = 0;
 }
 
-// DNS-over-TCP frames every message with a 2-byte length prefix, in both
-// directions. Send the finished response and close.
+// DNS-over-TCP 的每条报文在两个方向上都以 2 字节长度前缀封帧。
+// 发送完响应后关闭连接。
 static void tcpDnsReply(const uint8_t* msg, int len) {
   if (len > 0) {
     uint8_t lenOut[2] = { (uint8_t)(len >> 8), (uint8_t)(len & 0xFF) };
@@ -499,7 +492,7 @@ static void tcpDnsReply(const uint8_t* msg, int len) {
 }
 
 static void handleTcpDns() {
-  // Idle: take the next pending connection, if there is one.
+  // 空闲：若有等待中的连接，就接手下一条。
   if (tcpState == TCP_IDLE) {
     if (!tcpDnsClient || !tcpDnsClient.connected()) {
       tcpDnsClient = tcpDnsServer.accept();
@@ -514,24 +507,24 @@ static void handleTcpDns() {
   if (!tcpDnsClient.connected()) { tcpDnsReset(); return; }
 
   if (tcpState == TCP_READ) {
-    // Two-byte length prefix first.
+    // 先读 2 字节长度前缀。
     while (tcpLenGot < 2) {
       int n = tcpDnsClient.read(tcpLenBuf + tcpLenGot, 2 - tcpLenGot);
       if (n <= 0) {
         if ((int32_t)(millis() - tcpDeadline) >= 0) tcpDnsReset();
-        return;   // nothing to read yet; yield to the rest of loop()
+        return;   // 暂无可读数据；把控制权让给 loop() 的其余部分
       }
       tcpLenGot += n;
     }
     tcpMsgLen = (tcpLenBuf[0] << 8) | tcpLenBuf[1];
     if (tcpMsgLen < 12 || tcpMsgLen > DNS_BUF_SIZE) { tcpDnsReset(); return; }
 
-    // Message body, up to the length just read.
+    // 报文体，读到刚取出的长度为止。
     while (tcpGot < tcpMsgLen) {
       int n = tcpDnsClient.read(tcpBuf + tcpGot, tcpMsgLen - tcpGot);
       if (n <= 0) {
         if ((int32_t)(millis() - tcpDeadline) >= 0) tcpDnsReset();
-        return;   // partial message; yield and resume next pass
+        return;   // 报文尚不完整；让出控制权，下一轮继续
       }
       tcpGot += n;
     }
@@ -550,8 +543,8 @@ static void handleTcpDns() {
       return;
     }
 
-    // Forward: rewrite the ID to the sentinel, remember the client's, and
-    // switch to the wait state. The reply is picked up on a later pass.
+    // 转发：把 ID 改写成哨兵值，记住客户端原来的 ID，然后转入
+    // 等待状态。应答会在之后的某一轮被取回。
     tcpQueryID = (tcpBuf[0] << 8) | tcpBuf[1];
     tcpBuf[0] = 0xFF; tcpBuf[1] = 0xFE;
     tcpUpstream.beginPacket(UPSTREAM, 53);
@@ -564,8 +557,8 @@ static void handleTcpDns() {
     return;
   }
 
-  // TCP_FORWARD: the upstream reply arrives on tcpUpstream, not the client
-  // socket, so poll it and yield until it shows up or the deadline passes.
+  // TCP_FORWARD：上游应答到达的是 tcpUpstream 而不是客户端套接字，
+  // 因此轮询它并让出控制权，直到应答出现或超过截止时间。
   int sz = tcpUpstream.parsePacket();
   if (sz > 0) {
     int n = tcpUpstream.read(tcpBuf, DNS_BUF_SIZE);
@@ -580,7 +573,7 @@ static void handleTcpDns() {
   }
   if ((int32_t)(millis() - tcpDeadline) >= 0) tcpDnsReset();
 }
-// ---- auth (Basic Auth + CSRF token) ----
+// ---- 认证（Basic Auth + CSRF token）----
 String authPassword;
 String authToken;
 
@@ -619,9 +612,9 @@ static void loadAuth() {
     if (fo) { fo.println(authPassword); fo.println(authToken); fo.close(); }
     LOG("[AUTH] created admin account: user admin password %s\n", authPassword.c_str());
   } else {
-    // Printed on every boot on purpose. The console is behind Basic Auth, so
-    // a forgotten password would otherwise mean erasing /auth.cfg over
-    // serial; the port is already physical access to the device.
+    // 有意每次开机都打印 admin 账号密码。控制台有 Basic Auth 把守，
+    // 否则忘记密码就意味着要经串口擦除 /auth.cfg；而这个端口本身
+    // 就等同于对设备的物理接触。
     LOG("[AUTH] admin account: user admin password %s\n", authPassword.c_str());
   }
 }
@@ -637,15 +630,15 @@ static void requireAuth() {
   web.send(401, "text/plain", "auth required");
 }
 
-// Persist the admin password and CSRF token to /auth.cfg (password on
-// line 1, token on line 2). Used when the user changes the password from
-// the console, so the new one survives a reboot.
+// 把管理员密码与 CSRF token 持久化到 /auth.cfg（第 1 行为密码，
+// 第 2 行为 token）。用户在控制台里修改密码时调用，让新密码在
+// 重启后依然有效。
 static void saveAuth() {
   File f = LittleFS.open("/auth.cfg", "w");
   if (f) { f.println(authPassword); f.println(authToken); f.close(); }
 }
 
-// ---- web server ----
+// ---- web 服务器 ----
 static String macStr(const uint8_t* m) {
   char s[18]; snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", m[0],m[1],m[2],m[3],m[4],m[5]);
   return String(s);
@@ -656,9 +649,9 @@ static String jesc(const String& s) {
   return o;
 }
 
-// True while the device sits in AP mode waiting for WiFi credentials. The
-// dashboard is behind Basic Auth, but a device with no network cannot be
-// reached at a known address, so the setup page has to stay open.
+// 设备处于 AP 模式、等待 WiFi 凭据时为 true。仪表盘有 Basic Auth
+// 保护，但没有网络的设备无法通过已知地址访问到，因此配网页面
+// 必须保持开放。
 static bool portalMode = false;
 
 static void servePortal() {
@@ -697,10 +690,10 @@ static void handleStats() {
   snprintf(ut, sizeof(ut), "%lud %luh %lum", up/86400, (up%86400)/3600, (up%3600)/60);
   String bloomStr = bloomFilter ? (String(bloomBits / 8 / 1024) + " KB") : String("off");
 
-  // Built by concatenating well over a hundred small fragments (up to ~17 KB
-  // with 96 clients and 200 custom domains). Growing a String that way
-  // reallocates and copies repeatedly, which is exactly the churn that
-  // fragments the ESP32 heap. Size it once from the live counts instead.
+  // 通过拼接一百多个小片段构建（96 个客户端加 200 个自定义域名时
+  // 体积可达约 17 KB）。用这种方式增长 String 会反复重新分配并拷贝，
+  // 恰是造成 ESP32 堆碎片化的那种折腾。改为按实际计数一次性
+  // 预留好容量。
   size_t est = 320 + (size_t)numClients * 96 + (size_t)numCustom * 34 +
                (size_t)TOPN_SLOTS * 48 + (size_t)HIST_SLOTS * 8;
   String j;
@@ -740,8 +733,7 @@ static void handleStats() {
   web.send(200, "application/json", j);
 }
 
-// Force a panel redraw, so the screen can be refreshed on demand
-// without waiting out the refresh interval.
+// 强制面板重绘，让屏幕能够按需刷新，而不必干等刷新间隔结束。
 static void handleRefreshScreen() {
   if (!checkAuth()) { requireAuth(); return; }
   if (!checkToken()) { web.send(403, "text/plain", "bad token"); return; }
@@ -777,10 +769,10 @@ static void handleUnblock() {
   removeCustom(web.arg("d"));
   web.send(200, "text/plain", "ok");
 }
-// ---- remote blocklist config (persisted in /update.cfg) ----
-// The URL has to serve a file already in this firmware's binary format, so
-// in practice it points at a copy of a blocklist.bin the user hosts
-// somewhere. Uploading the .bin through the console covers the rest.
+// ---- 远程黑名单配置（持久化在 /update.cfg）----
+// 该 URL 必须返回一个已经是本固件二进制格式的文件，因此实际上它
+// 指向用户托管在某处的一份 blocklist.bin 副本。通过控制台上传
+// .bin 文件则覆盖其余情况。
 static void saveUpdateCfg() {
   File f = LittleFS.open("/update.cfg", "w");
   if (f) { f.println(updateUrl); f.println((unsigned long)updateIntervalH); f.close(); }
@@ -822,14 +814,12 @@ static void handleSetWifi() {
   ESP.restart();
 }
 
-// ---- change the admin password ----
-// Reached from the console, which sits behind Basic Auth: a request that
-// gets this far has already been validated against the CURRENT password,
-// so the old one does not have to be sent again. The new password is
-// written straight to /auth.cfg and takes effect on the next request -
-// the browser, still caching the old credentials, will be re-prompted.
-// Error bodies stay ASCII (like the other endpoints); the console turns
-// them into Chinese toasts, so no panel glyphs are needed for them.
+// ---- 修改管理员密码 ----
+// 由控制台调用，而控制台受 Basic Auth 保护：能走到这里的请求
+// 已经用当前密码验证过了，因此无需再次提交旧密码。新密码直接
+// 写入 /auth.cfg 并在下一次请求时生效——浏览器仍缓存着旧凭据，
+// 会重新弹出认证提示。错误响应体保持 ASCII（与其他端点一致）；
+// 控制台会把它们转成中文 toast，因此不需要为此准备面板字形。
 static void handleSetPass() {
   if (!checkAuth()) { requireAuth(); return; }
   if (!checkToken()) { web.send(403, "text/plain", "bad token"); return; }
@@ -838,9 +828,9 @@ static void handleSetPass() {
     web.send(400, "text/plain", "length");
     return;
   }
-  // Keep /auth.cfg a valid single line: it is read back line-by-line, so a
-  // newline would split the password, and leading/trailing whitespace would
-  // be trimmed away. Printable ASCII without spaces sidesteps both.
+  // 保持 /auth.cfg 恰好是一行有效内容：读取时按行拆分，换行符会
+  // 把密码切断，首尾空白则会被裁掉。不含空格的可打印 ASCII 字符
+  // 能把两个问题都避开。
   for (size_t i = 0; i < np.length(); i++) {
     char c = np[i];
     if (c < 0x21 || c > 0x7E) {
@@ -857,7 +847,7 @@ static void handleSetPass() {
   LOG("[AUTH] admin password changed, user admin password %s\n", authPassword.c_str());
   web.send(200, "text/plain", "ok");
 }
-// ---- blocklist loading ----
+// ---- 黑名单（blocklist.bin）加载 ----
 static bool loadBlocklist() {
   if (blocklist) blocklist.close();
   if (!LittleFS.exists(BLOCKLIST_PATH)) {
@@ -888,31 +878,31 @@ static bool loadBlocklist() {
   }
   if (bloomFilter) { free(bloomFilter); bloomFilter = nullptr; }
   if (bloomBits > 0) {
-    // 128 KB of randomly-addressed table: PSRAM is the right home for it.
-    // DRAM is only 176 KB total and WiFi wants most of it.
-    // PSRAM only, on purpose. A DRAM fallback would pull 128 KB out of the
-    // 176 KB internal pool that WiFi, lwIP and the web server all share, and
-    // the device panics as soon as the network stack comes up.
+    // 128 KB 的随机寻址表：放 PSRAM 才是正解。DRAM 总共只有
+    // 176 KB，而 WiFi 就要占去大半。
+    // 有意只允许 PSRAM。若回退到 DRAM，等于从 WiFi、lwIP 与 web
+    // 服务器共享的 176 KB 内部内存池里再抽走 128 KB，网络栈一起来
+    // 设备就会 panic。
     bloomFilter = (uint8_t*)heap_caps_malloc(bloomBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (bloomFilter) {
       uint32_t rd = blocklist.read(bloomFilter, bloomBytes);
       if (rd != bloomBytes) { free(bloomFilter); bloomFilter = nullptr; }
     }
     if (!bloomFilter) {
-      // No room for the pre-filter: every lookup now goes to flash, which
-      // is slower but still correct. bloomMayContain() fails open.
+      // 预过滤器没有容身之处了：此后每次查询都直接落到 flash，
+      // 慢一些但结果仍然正确。bloomMayContain() 会放行（fail open）。
       LOG("[BL] bloom %u KB not in PSRAM - flash-only lookup\n",
           (unsigned)(bloomBytes >> 10));
     }
   }
-  // The hash table sits after the Bloom filter whether or not we managed to
-  // keep a copy of it in RAM, so this offset never depends on the alloc.
+  // 无论 Bloom 过滤器是否成功在 RAM 中留有副本，哈希表都位于
+  // 它之后，因此这个偏移量从不依赖那次分配的结果。
   hashTableOffset = BL_HEADER_SIZE + bloomBytes;
   LOG("[BL] %u domains, bloom %u KB\n", numHashes, bloomFilter ? bloomBytes / 1024 : 0);
   return numHashes > 0;
 }
 
-// ---- remote blocklist fetch ----
+// ---- 远程黑名单拉取 ----
 static bool fetchBlocklist(String url) {
   if (url.length() == 0) return false;
   web.send(200, "text/plain", "fetching...");
@@ -922,7 +912,7 @@ static bool fetchBlocklist(String url) {
   HTTPClient http;
   WiFiClient plain;
   WiFiClientSecure secure;
-  secure.setCACert(nullptr);  // rely on the embedded bundle
+  secure.setCACert(nullptr);  // 依赖固件内置的证书包
 
   bool begun = https ? http.begin(secure, url) : http.begin(plain, url);
   if (!begun) { DASH_SETSTATUS("bad url"); return false; }
@@ -975,7 +965,7 @@ static bool fetchBlocklist(String url) {
   DASH_SETSTATUS("never");
   return true;
 }
-// ---- config portal (AP mode) ----
+// ---- 配网门户（AP 模式）----
 static void startConfigPortal() {
   portalMode = true;
   WiFi.mode(WIFI_AP);
@@ -985,10 +975,9 @@ static void startConfigPortal() {
       AP_SSID_DEFAULT, WiFi.softAPIP().toString().c_str());
 }
 
-// Leave the portal and go back to being a station. Called once the setup
-// form has been saved, so the board does not sit in AP mode serving a form
-// nobody is looking at while the DNS engine is what the user actually
-// wanted. The credentials are already in /wifi.cfg at this point.
+// 离开配网门户，回到 station 角色。配网表单保存完成后调用一次，
+// 免得开发板一直停在 AP 模式、对着一个没人再看的表单空耗——
+// 用户真正想要的是 DNS 引擎在工作。此时凭据已经写入 /wifi.cfg。
 static void stopConfigPortal() {
   portalMode = false;
   WiFi.softAPdisconnect(true);
@@ -1032,8 +1021,8 @@ static void handleBlocklistDone() {
 }
 
 // ---- WiFi ----
-// The compile-time values in secrets.h are still just a placeholder until
-// someone fills them in, so treat the shipped strings as "not configured".
+// secrets.h 中的编译期取值在有人填入真实内容之前只是占位符，因此
+// 把出厂字符串视为「未配置」。
 static bool isPlaceholderSecret(const char* s) {
   return !s || !*s || strcmp(s, "your-ssid") == 0 || strcmp(s, "your-password") == 0;
 }
@@ -1059,10 +1048,10 @@ static bool connectWifi(uint32_t timeoutMs) {
     LOG("[WIFI] ssid '%s' (%s), starting\n", ssid.c_str(), source);
     WiFi.begin(ssid.c_str(), pass.c_str());
   } else {
-    // Nothing configured here, so fall back to the WiFi driver's own NVS
-    // store. This is not a corner case: the panel this firmware came from
-    // saved its network through its web app, so a board that has already
-    // been in service joins on its own with no setup at all.
+    // 这里没有任何配置，于是回退到 WiFi 驱动自带的 NVS 存储。
+    // 这并非罕见的边角情况：本固件源自的面板是通过它的 web 应用
+    // 保存网络的，因此一块已经在服役的板子无需任何设置就能
+    // 自行入网。
     wifi_config_t stored;
     const bool have = (esp_wifi_get_config(WIFI_IF_STA, &stored) == ESP_OK) &&
                       stored.sta.ssid[0] != 0;
@@ -1095,9 +1084,9 @@ void setup() {
   Serial.begin(115200);
   g_bootReason = (uint8_t)esp_reset_reason();
   g_bootMillis = millis();
-  // The board's only console is the native USB port, and TinyUSB discards
-  // anything written before the host attaches the CDC. Wait for it briefly
-  // (bounded, so a standalone battery boot is not held up).
+  // 这块板子唯一的控制台是原生 USB 端口，而 TinyUSB 会丢弃主机
+  // 挂载 CDC 之前写入的所有内容。稍微等它一会儿（有上限，纯电池
+  // 启动时不会被拖住）。
   uint32_t serialWaitStart = millis();
   while (!Serial && millis() - serialWaitStart < 5000) delay(10);
   Serial.printf("AdBlock EPD booting (reset=%u heap=%u psram=%u)\n",
@@ -1108,8 +1097,8 @@ void setup() {
   pinMode(PIN_CFG_BTN, INPUT_PULLUP);
 
 
-  // Mount without formatting first: LittleFS.begin(true) formats whenever the
-  // mount fails, which silently erases a freshly flashed blocklist.
+  // 先尝试不格式化直接挂载：LittleFS.begin(true) 只要挂载失败就会
+  // 格式化，那会无声无息地擦掉刚烧录好的黑名单。
   if (!LittleFS.begin(false, "/littlefs", 10, LFS_PARTITION)) {
     LOGN("[FS] mount failed - formatting");
     if (!LittleFS.begin(true, "/littlefs", 10, LFS_PARTITION))
@@ -1139,9 +1128,9 @@ void setup() {
       (unsigned)ESP.getFreePsram());
   Serial.flush();
 
-  // On-device check that the flash hash table answers correctly. The host
-  // tests cover the builder; this covers the firmware's own suffix walk,
-  // Bloom pre-filter and binary search against the real flashed image.
+  // 在设备上自检 flash 哈希表应答是否正确。主机侧测试覆盖的是
+  // 构建器；这里覆盖的是固件自身的后缀逐级检查、Bloom 预过滤与
+  // 对真实烧录镜像的二分查找。
   {
     static const char* kBlocked[] = {"doubleclick.net", "ads.doubleclick.net",
                                      "googleadservices.com", "scorecardresearch.com"};
@@ -1167,16 +1156,15 @@ void setup() {
   LOG("[BOOT] heap after boot screen=%u\n", (unsigned)ESP.getFreeHeap());
   Serial.flush();
 
-  // The network stack has to be initialised before anything opens a socket:
-  // WiFiServer::begin() calls socket(), which posts to the lwIP tcpip thread,
-  // and doing that before esp_netif_init() aborts in tcpip.c with
-  // "assert failed: tcpip_send_msg_wait_sem (Invalid mbox)".
+  // 必须先初始化网络栈，之后才能有代码打开套接字：
+  // WiFiServer::begin() 会调用 socket()，向 lwIP 的 tcpip 线程投递消息；
+  // 若在 esp_netif_init() 之前就这么做，tcpip.c 会以
+  // "assert failed: tcpip_send_msg_wait_sem (Invalid mbox)" 中止。
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
 
-  // Registered before the WiFi branch so the setup portal works too: a fresh
-  // device has no /wifi.cfg, and the page served in AP mode is the only way
-  // to give it one.
+  // 在 WiFi 分支之前注册，这样配网门户也能用：全新设备没有
+  // /wifi.cfg，而 AP 模式下提供的这个页面是给它写入凭据的唯一途径。
   web.on("/", handleRoot);
   web.on("/stats", handleStats);
   web.on("/refresh-screen", handleRefreshScreen);
@@ -1219,9 +1207,9 @@ void setup() {
 }
 
 void loop() {
-  // Finish a panel refresh that is still in flight. The glass needs ~15 s
-  // after a frame has been streamed, and this is where that time is spent
-  // instead of inside the drawing call, so DNS keeps being answered.
+  // 收尾仍在进行中的面板刷新。一帧流式写入完成后，玻璃面板还需要
+  // 约 15 s 才能稳定，这段时间就花在这里而不是绘图调用内部，
+  // 因此 DNS 仍能持续得到应答。
   epdServiceRefresh();
 
   web.handleClient();
@@ -1236,10 +1224,9 @@ void loop() {
 
   uint32_t now = millis();
 
-  // Rotate a daily summary once the clock has rolled over. `lastDay`
-  // starts at -1 so the first tick after NTP lands only records the
-  // date; otherwise the clock jumping from 1970 to today on the very
-  // first sync would look like a rollover and wipe today's counts.
+  // 时钟跨过一天后就轮转一次当日汇总。`lastDay` 初值取 -1，让 NTP
+  // 对时落地后的第一次 tick 只记录日期；否则首次同步时时钟从
+  // 1970 年跳到今天会被当成跨日，清掉当天的计数。
   static int lastDay = -1;
   struct tm tmNow;
   time_t t = time(nullptr);
@@ -1252,8 +1239,8 @@ void loop() {
     lastDay = tmNow.tm_mday;
   }
 
-  // Panel: full redraw on the interval, and immediately when the
-  // config button is held (a manual "show me the numbers" gesture).
+  // 面板：按间隔整幅重绘；按住配置按键时立即重绘
+  // （手动「给我看数据」的手势）。
   if (now - lastDashMs >= DASH_REFRESH_MS) {
     dashboardDraw();
     lastDashMs = now;
@@ -1261,10 +1248,9 @@ void loop() {
   if (digitalRead(PIN_CFG_BTN) == LOW) {
     delay(SHORT_PRESS_MIN_MS);
     if (digitalRead(PIN_CFG_BTN) == LOW) {
-      // Hold length decides the action. Short: redraw the dashboard, a
-      // manual "show me the numbers". Long: open the setup portal again -
-      // the board's only route back to the WiFi form once it is out of
-      // range of the network it was set up for.
+      // 按住时长决定动作。短按：重绘仪表盘，即手动「给我看数据」。
+      // 长按：再次打开配网门户——一旦开发板离开当初配网所用网络的
+      // 覆盖范围，这是回到 WiFi 表单的唯一入口。
       uint32_t heldMs = 0;
       bool longPress = false;
       while (digitalRead(PIN_CFG_BTN) == LOW) {
@@ -1286,7 +1272,7 @@ void loop() {
     }
   }
 
-  // Periodic blocklist pull, only once DNS has gone quiet.
+  // 定期拉取黑名单，只在 DNS 已经安静下来之后执行。
   if (updateIntervalH > 0 && updateUrl.length() &&
       now - lastPeriodicPullMs >= updateIntervalH * 3600000UL &&
       now - lastDnsActivityMs > REMOTE_FETCH_IDLE_MS) {
@@ -1294,22 +1280,18 @@ void loop() {
     lastPeriodicPullMs = now;
   }
 
-  // A dropped link has to be picked up again or the device goes quiet:
-  // the reconnect used to happen at exactly one place, before the first
-  // pass through here, so every later disassociation (router reboot,
-  // the AP it roamed to going away, the brief drop during a panel
-  // refresh) left it stuck on "ip offline" until the next power cycle.
-  // WL_CONNECTED only covers the first patch of the tree; every later
-  // status means the station is down and should be restarted.
+  // 链路掉线后必须重新接上，否则设备就会悄无声息：过去重连只在
+  // 进入这里的第一轮之前发生一次，此后任何一次断连（路由器重启、
+  // 漫游到的 AP 消失、面板刷新期间的短暂掉线）都会让设备卡在
+  // 「ip offline」上，直到下一次断电重启。WL_CONNECTED 只覆盖
+  // 状态树的第一段分支；之后出现的任何其他状态都说明 station 已
+  // 掉线，应当把它重新拉起。
   //
-  // The retries are also counted: a network the board cannot get back onto
-  // (password changed, router replaced, board moved) would otherwise be
-  // retried forever with no way for anyone to correct it from the device
-  // itself. After WIFI_RETRY_BEFORE_PORTAL consecutive failures the board
-  // gives up on the stored credentials and opens the setup portal, which
-  // is what "let me reconnect the WiFi" has to mean when the person doing
-  // the reconnecting is standing in front of the panel rather than
-  // attached to a serial console.
+  // 重试也要计数：一块板子怎么也连不回去的网络（密码改了、路由器
+  // 换了、板子挪了地方）否则会被永远重试下去，而没有人能从设备
+  // 本身纠正它。连续失败 WIFI_RETRY_BEFORE_PORTAL 次后，开发板放弃
+  // 存储的凭据并打开配网门户——当负责重连的人就站在面板前而不是
+  // 接着串口控制台时，「帮我重连 WiFi」就该是这个意思。
   static uint32_t lastWifiRetryMs = 0;
   static uint8_t  wifiFailCount  = 0;
   if (!portalMode && WiFi.status() != WL_CONNECTED &&
@@ -1324,9 +1306,9 @@ void loop() {
       LOGN("[WIFI] cannot reach the stored network - opening the setup portal");
       startConfigPortal();
     } else {
-      // A full radio restart, not just an association retry: the
-      // credentials are unchanged, so WiFi.reconnect() alone re-runs the
-      // same handshake that has already failed N times.
+      // 完整地重启射频，而不只是重试关联：凭据并没有变，仅靠
+      // WiFi.reconnect() 只会把那条已经失败过 N 次的握手原样
+      // 重跑一遍。
       WiFi.disconnect(false, false);
       delay(100);
       connectWifi(WIFI_TIMEOUT);
@@ -1334,9 +1316,9 @@ void loop() {
   }
   if (WiFi.status() == WL_CONNECTED) wifiFailCount = 0;
 
-  // Heartbeat. There is exactly one console (the USB CDC port), and in AP
-  // mode nothing else is logged, so a status line keeps the device
-  // observable without attaching a debugger.
+  // 心跳。控制台只有一个（USB CDC 端口），AP 模式下也没有任何
+  // 其他日志，因此这行状态信息让设备在没有调试器的情况下依然
+  // 保持可观测。
   static uint32_t lastBeatMs = 0;
   if (now - lastBeatMs >= 5000UL) {
     lastBeatMs = now;

@@ -1,20 +1,18 @@
 #include "epd_driver.h"
 #include "config.h"
 
-// ── Software SPI (bit-bang) ──────────────────────────────────
-// The panel hangs off arbitrary GPIOs and the driver has to reproduce the
-// vendor's byte-level bus behaviour exactly, so the bus is driven by
-// bit-banging rather than by the SPI peripheral.
+// ── 软件 SPI（bit-bang 模拟）─────────────────────────────────
+// 面板接在任意指定的 GPIO 上，而驱动必须精确复现厂商字节级的总线
+// 行为，因此总线用 bit-bang 翻转 GPIO 来驱动，而不使用 SPI 外设。
 //
-// This was briefly moved to the SPI peripheral to cut the frame time. It
-// made a frame look 35x faster (16.8 s -> 0.47 s) but the speed-up was
-// fake: measuring digitalWrite (370 ns/op, so ~1.1 s for a whole frame of
-// bit-bang) showed that ~15.4 s of the old frame was the PANEL's own busy
-// time, and the SPI build's idle-wait had collapsed to 19 ms - the panel
-// had stopped refreshing altogether. Bit-banging is therefore kept: it
-// costs ~1.2 s out of a ~16.5 s refresh and is the only path with evidence
-// of actually driving this panel.
+// 曾短暂改用 SPI 外设以缩短帧时间：表面上帧快了 35 倍
+// （16.8 s -> 0.47 s），但提速是假的——实测 digitalWrite（370 ns/次，
+// 整帧 bit-bang 约 1.1 s）后发现，旧帧中约 15.4 s 是面板自身的
+// busy 时间，而 SPI 版本的空闲等待骤降到 19 ms，说明面板已完全
+// 停止刷新。因此保留 bit-bang：它在约 16.5 s 的刷新周期里只占
+// 约 1.2 s，且是唯一有证据表明真正驱动了这块面板的路径。
 
+// 以 MSB 在前的顺序逐位输出一个字节，面板在 SCK 上升沿采样。
 static void spiWriteByte(uint8_t data) {
   for (int i = 0; i < 8; i++) {
     digitalWrite(PIN_EPD_MOSI, (data & 0x80) ? HIGH : LOW);
@@ -25,22 +23,22 @@ static void spiWriteByte(uint8_t data) {
 }
 
 static void epdSendCommand(uint8_t cmd) {
-  digitalWrite(PIN_EPD_DC, LOW);   // DC low = command
+  digitalWrite(PIN_EPD_DC, LOW);   // DC 低电平 = 命令
   digitalWrite(PIN_EPD_CS, LOW);
   spiWriteByte(cmd);
   digitalWrite(PIN_EPD_CS, HIGH);
 }
 
 static void epdSendData(uint8_t data) {
-  digitalWrite(PIN_EPD_DC, HIGH);  // DC high = data
+  digitalWrite(PIN_EPD_DC, HIGH);  // DC 高电平 = 数据
   digitalWrite(PIN_EPD_CS, LOW);
   spiWriteByte(data);
   digitalWrite(PIN_EPD_CS, HIGH);
 }
 
-// BUSY is active-low on this panel: low means still working. A full refresh
-// holds it low for roughly 15 s, so the duration of these waits is also the
-// cheapest proof that the panel is really running its update.
+// 这块面板的 BUSY 为低电平有效：低电平表示仍在工作。整次刷新会把它
+// 拉低约 15 s，因此这段等待的时长本身也是最廉价的佐证，证明面板
+// 确实在执行刷新。
 static void epdWaitBusy(unsigned long maxMs) {
   unsigned long t0 = millis();
   unsigned long timeoutMs = maxMs > 0 ? maxMs : 45000;
@@ -73,8 +71,7 @@ void gpioInit() {
   digitalWrite(PIN_EPD_SCK, LOW);
 }
 
-// Simplified init sequence ported from the panel vendor's
-// epd7in3g-A0.cpp Init().
+// 从面板厂商的 epd7in3g-A0.cpp Init() 移植并精简的初始化序列。
 void epdInit() {
   epdReset();
   epdWaitBusy();
@@ -93,30 +90,25 @@ void epdInit() {
   epdWaitBusy();
 }
 
-// ── Band transfer ────────────────────────────────────────────
-// The vendor driver writes the image one row at a time, every row with its
-// own 0x83 window. Reducing its loop to a closed form: source row d goes to
-// window 2d+1 for d < H/2, and to window 2(H-1-d) for d >= H/2. The panel
-// therefore interleaves the two halves of the frame in the window space -
-// the odd windows take the first half of the image, the even windows take
-// the second half in reverse.
+// ── 分带传输 ─────────────────────────────────────────────────
+// 厂商驱动一次写一行图像，每行都使用各自的 0x83 窗口。把它的循环
+// 归纳为闭式：源行 d 在 d < H/2 时写入窗口 2d+1，在 d >= H/2 时
+// 写入窗口 2(H-1-d)。也就是说，面板在窗口空间里把帧的上下两半
+// 交错排布——奇数窗口承接图像上半部分，偶数窗口倒序承接下半部分。
 //
-// That is why the window is derived from the DATA row (rBase + k) rather
-// than from a running counter. A window sequence that merely walks
-// 0,1,2,... down the panel writes the image back-to-front over its second
-// half as well, and the glass then shows the picture twice: right way up
-// on top, mirrored-and-inverted underneath. Every byte is still accepted,
-// so the panel reports a perfectly healthy 15 s refresh either way - only
-// a photo of the glass distinguishes them.
+// 这正是窗口必须由数据行（rBase + k）推导、而非使用递增计数器的
+// 原因。若窗口序列只是沿面板 0,1,2,... 走下去，图像下半部分会被
+// 反着写回，玻璃上于是出现两幅画面：上半幅正立，下半幅镜像且
+// 倒置。两种写法面板都照单全收，并同样报告一次历时 15 s 的
+// 「健康」刷新——只有给玻璃拍照才能区分二者。
 //
-// Two transforms are applied while streaming: the bytes of a row go out
-// right-to-left, and the four pixels inside each byte are reversed.
-// display.cpp applies the matching rotation and mirror as it draws, so
-// what the caller drew upright comes out upright.
+// 流式发送时施加两个变换：一行的字节按从右到左的顺序发出，且字节
+// 内的 4 个像素顺序反转。display.cpp 在绘制时施加配套的旋转与
+// 镜像，因此调用方画出的正立内容最终显示出来也是正立的。
 
 static uint8_t s_bandBuf[BAND_BUF_LEN];
 
-// Select a one-row window and start its data phase.
+// 选定一个单行窗口并进入其数据阶段。
 static void epdRowWindow(int pRow) {
   epdSendCommand(0x83);
   epdSendData(0x00);
@@ -140,7 +132,7 @@ static void epdRowData(const uint8_t* row) {
   }
 }
 
-// Hand the window back to the full frame before triggering the update.
+// 在触发刷新之前，把窗口交还给整幅帧。
 static void epdRestoreFullWindow() {
   epdSendCommand(0x83);
   epdSendData(0x00);
@@ -154,22 +146,20 @@ static void epdRestoreFullWindow() {
   epdSendData(0x01);
 }
 
-// State for the half-finished frame between epdSendFrame() and
-// epdServiceRefresh().
+// epdSendFrame() 与 epdServiceRefresh() 之间半成品帧的状态。
 static bool     s_refreshing  = false;
 static uint32_t s_frameStartMs = 0;
 static uint32_t s_armedMs      = 0;
 static uint32_t s_rowsDoneMs   = 0;
 static uint32_t s_streamMs     = 0;
 
-// Not wrapped in a retry loop: the vendor's loop returned on its first
-// iteration for this panel, so there is nothing to retry on.
+// 不套重试循环：在这块面板上，厂商驱动的循环第一次迭代即返回，
+// 没有什么可重试的。
 //
-// Everything up to and including the 0x12 update command, then out. The
-// panel spends the next ~15 s on the glass and we get back to the network.
+// 一直执行到 0x12 刷新命令（含）为止，然后立即返回。面板接下来用
+// 约 15 s 刷新玻璃，我们则回到网络事务中。
 uint32_t epdSendFrame(void (*renderBand)(int rBase, int rows, uint8_t* buf)) {
-  // epdInit() resets and re-powers the panel, which must not happen while
-  // the previous frame is still being refreshed.
+  // epdInit() 会复位并重新给面板上电，上一帧仍在刷新期间绝不能这么做。
   if (s_refreshing) epdWaitRefresh();
 
   const int bytesPerRow = W / 4;
@@ -187,12 +177,11 @@ uint32_t epdSendFrame(void (*renderBand)(int rBase, int rows, uint8_t* buf)) {
     renderBand(rBase, rows, s_bandBuf);
 
     for (int k = 0; k < rows; k++) {
-      // Buffer row d = rBase + k. This is the vendor mapping, verified
-      // window-for-window against its own loop: data rows 0..H/2-1 land in
-      // the ODD windows (2d+1, ascending) and rows H/2..H-1 in the EVEN
-      // ones (2(H-1-d), descending). The two halves are not contiguous
-      // bands of the panel - the panel interleaves them - so the window
-      // must be computed from the data row, not from a running counter.
+      // 缓冲区行 d = rBase + k。这是厂商的映射关系，已逐窗口对照
+      // 其原始循环核实：数据行 0..H/2-1 落入奇数窗口（2d+1，递增），
+      // 行 H/2..H-1 落入偶数窗口（2(H-1-d)，递减）。这两半并不是
+      // 面板上连续的分区——面板把它们交错排布——因此窗口必须由
+      // 数据行计算得出，而不能用递增计数器。
       int d = rBase + k;
       int p = (d < H / 2) ? (2 * d + 1) : (2 * (H - 1 - d));
       epdRowWindow(p);
@@ -218,7 +207,7 @@ bool epdRefreshActive() { return s_refreshing; }
 
 bool epdServiceRefresh() {
   if (!s_refreshing) return true;
-  if (digitalRead(PIN_EPD_BUSY) == LOW) return false;   // glass still moving
+  if (digitalRead(PIN_EPD_BUSY) == LOW) return false;   // 玻璃仍在刷新中
 
   uint32_t tWait = millis();
   epdSendCommand(0x02);
@@ -226,9 +215,8 @@ bool epdServiceRefresh() {
   epdWaitBusy();
   uint32_t tOff = millis();
 
-  // The panel's own busy time is the only honest proof that it really
-  // refreshed the glass: expect ~15 s here, and treat a few tens of ms as
-  // "the update was never accepted".
+  // 面板自身的 busy 时长才是它确实刷新了玻璃的唯一可信证明：此处应
+  // 约为 15 s；若只有几十毫秒，则视为「更新命令根本未被接受」。
   Serial.printf("[EPD] arm=%lu rows=%lu stream=%lu refresh=%lu off=%lu total=%lu ms",
                 s_armedMs, s_rowsDoneMs - s_armedMs, s_streamMs,
                 tWait - (s_frameStartMs + s_streamMs), tOff - tWait,
@@ -243,6 +231,7 @@ void epdWaitRefresh() {
   while (!epdServiceRefresh()) delay(10);
 }
 
+// 深度休眠：0x07 命令 + 0xA5 校验码，随后延时确保命令生效。
 void epdSleep() {
   epdSendCommand(0x07);
   epdSendData(0xA5);

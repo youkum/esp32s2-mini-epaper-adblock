@@ -3,53 +3,46 @@
 
 #include <Arduino.h>
 
-// ── JDY79668 7.5" four-colour e-paper driver ─────────────────
-// Ported from InkSight's epd_driver.cpp (bit-bang SPI, panel-specific
-// init sequence). Only the EPD_PANEL_75_JDY79668 path is kept.
+// ── JDY79668 7.5 英寸四色电子纸驱动 ─────────────────────────
+// 移植自 InkSight 的 epd_driver.cpp（bit-bang 软件 SPI、面板专用
+// 初始化序列），仅保留 EPD_PANEL_75_JDY79668 这一路径。
 //
-// The panel is 768x552 at 2 bits per pixel, so a whole canvas would be
-// 105,984 bytes. That does not fit in the DRAM of the ESP32-S2, so the
-// image is rendered and streamed in bands instead.
+// 面板为 768x552、每像素 2 位，整幅画布共 105,984 字节，超出
+// ESP32-S2 的 DRAM 容量，因此图像按分带（band）渲染并流式发送。
 
 void gpioInit();
 void epdInit();
 void epdSleep();
 
-// ── Frame transfer, split so the panel can refresh in the background ──
-// Setting up a frame and pushing all the pixels costs about 1.4 s; the
-// panel then holds BUSY low for a further ~15 s while it moves the
-// pigments. Waiting that out inside the drawing call would stop the DNS
-// engine answering queries for 15 s every time the dashboard redraws.
+// ── 帧传输：拆成两段，让面板在后台完成刷新 ──────────────────
+// 组帧并推送全部像素约需 1.4 s；随后面板在搬运颜料期间还会把 BUSY
+// 继续拉低约 15 s。若在绘制调用里干等这段时间，仪表盘每重绘一次，
+// DNS 引擎就会停摆 15 s、无法应答查询。
 //
-// So epdSendFrame() does the blocking half - reset, power-on, the bands,
-// the full-window restore and the 0x12 update command - and returns as
-// soon as the glass starts refreshing. The main loop then calls
-// epdServiceRefresh() until it returns true; that is what powers the
-// panel back down (0x02) once BUSY has gone high. Neither call waits for
-// the glass, so the network keeps running throughout the refresh.
+// 因此 epdSendFrame() 只做阻塞的那一半——复位、上电、各分带、
+// 全窗口恢复以及 0x12 刷新命令——并在玻璃开始刷新后立即返回。
+// 主循环随后反复调用 epdServiceRefresh() 直至其返回 true；正是这个
+// 函数在 BUSY 变高后给面板断电（0x02）。两个调用都不等待玻璃，
+// 因此整个刷新期间网络始终正常运转。
 
-// Renders the whole panel, one band of EPD_CHUNK_ROWS rows at a time.
-// renderBand() is called once per band and must fill buf with rows
-// pre-rotation rows starting at pre-rotation row rBase, in the 2bpp
-// layout the drawing helpers use (4 pixels per byte, most significant
-// pair leftmost, W/4 bytes per row). The buffer is owned by the driver
-// and is BAND_BUF_LEN bytes long.
+// 渲染整块面板，每次发送一个最多 EPD_CHUNK_ROWS 行的分带。
+// renderBand() 每个分带被调用一次，必须把从旋转前行 rBase 开始的
+// rows 个旋转前行，按绘制辅助函数所用的 2bpp 布局填入 buf
+// （每字节 4 像素、最高位的像素对在最左、每行 W/4 字节）。缓冲区
+// 由驱动持有，长度为 BAND_BUF_LEN 字节。
 //
-// Returns the milliseconds spent streaming, or 0 if it had to wait for a
-// previous refresh first. Any frame already in flight is finished before
-// the new one starts.
+// 返回流式发送耗时（毫秒）；若本次调用先等待了上一次刷新完成，
+// 则返回 0。上一帧若仍在刷新，会先等服务它结束再开始新帧。
 uint32_t epdSendFrame(void (*renderBand)(int rBase, int rows, uint8_t* buf));
 
-// True while the panel is still refreshing a frame that was sent.
+// 已发送的帧仍在刷新面板期间返回 true。
 bool epdRefreshActive();
 
-// Call from the main loop. Returns true when nothing is pending; on the
-// first call after BUSY goes high it sends the power-off command and
-// logs the frame timing. Returns false while the glass is still busy.
+// 由主循环调用。无待处理事项时返回 true；在 BUSY 变高后的首次调用
+// 中发送断电命令并记录帧耗时。玻璃仍在刷新期间返回 false。
 bool epdServiceRefresh();
 
-// Blocks until any in-flight refresh has been serviced. Only needed where
-// nothing else can service it.
+// 阻塞直到进行中的刷新被处理完毕。仅在无其他代码能代为轮询时才需要。
 void epdWaitRefresh();
 
 #endif // ADBLOCK_EPD_DRIVER_H

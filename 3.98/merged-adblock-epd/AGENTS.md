@@ -1,5 +1,21 @@
 # AGENTS.md
 
+## 语言（强制）
+
+**本项目的所有说明性内容一律用简体中文**：README、GUIDE、CREDITS、Release 说明、
+提交信息正文、Issue 与 PR 描述、代码注释、串口/日志中面向人的文案，凡能用中文的
+都用中文。仅以下内容保留英文原文，以免产生歧义或误操作：
+
+- 信号名与引脚名（如 `EPD DC`、`EPD BUSY`、`MOSI`）、GPIO 编号；
+- 协议/接口/标识符（`DNS`、`lwIP`、`PSRAM`、`mDNS`、`OTA`、`CSRF`、`Basic Auth` 等）；
+- 命令、路径、文件名、代码标识符、寄存器/魔数（如 `CADB`、`HASH_BYTES`）；
+- 许可证名称（`MIT`、`GPL-3.0`）与上游项目名。
+
+本仓库不保留英文版文档（`README.en.md` / `GUIDE.en.md` 已移除），默认展示与
+新增内容一律简体中文。GitHub 仓库页展示 `README.md`（中文），不要把它换回英文。
+
+源码注释一律使用简体中文，仅术语（信号名、协议、标识符、魔数、许可证名）保留英文。
+
 ## Project
 
 `merged-adblock-epd` — a DNS sinkhole with a four-colour e-paper

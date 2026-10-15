@@ -1,6 +1,6 @@
-# Issue tracker: GitHub
+# Issue tracker：GitHub
 
-Issues and specs for this repo live as GitHub issues.
+本仓库的票与规格都活在 GitHub Issues 里。
 
 ## 怎么做（先看这一节）
 
@@ -34,25 +34,25 @@ Issues and specs for this repo live as GitHub issues.
 工具会优先用后端自己的原生能力（GitHub 上是原生子议题与原生依赖边）。真拿不到时，才退回在子票正文首行
 写一行 `Blocked by: #n`（多个阻塞票号用逗号隔开）。这一行是三后端共用的降级写法，不许拿它当默认做法。
 
-## Pull requests as a triage surface
+## 把 PR 作为 triage 入口
 
-**PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
+**把外部 PR 当作请求入口：否。**（若本仓库把外部 PR 视作功能请求，则改为 `yes`；`/triage` 会读取这个开关。）
 
 这一项写成 `yes` 之后，PR 与 issue 走同一套标签与状态流转，按当前后端自己的方式读写 PR（在这条后端上就是
 命令行里把 issue 那一族子命令换成 PR 那一族）。GitHub 把 issue 与 PR 编在同一套号码里，所以正文里光写
 `#42` 分不清是哪一个 —— 遇到这种编号要么把两种都查一遍，要么直接向用户确认是哪一个。
 
-## When a skill says "publish to the issue tracker"
+## 当技能要求「publish to the issue tracker」时
 
 用 `deck_issue_create` 建一张票。
 
-## When a skill says "fetch the relevant ticket"
+## 当技能要求「fetch the relevant ticket」时
 
 用 `deck_issue_get` 读那张票（连同它的评论与标签）。
 
-## Wayfinding operations
+## Wayfinding 操作
 
-Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets. 下面这几件事全部走工具，
+由 `/wayfinder` 使用。**地图（Map）**是一张 issue，其**子 issue（child）**作为票据。下面这几件事全部走工具，
 一处都不手敲命令。
 
 - **Map**: 一张打了 `wayfinder:map` 标签的票，正文里放着 Notes / Decisions-so-far / Fog。用

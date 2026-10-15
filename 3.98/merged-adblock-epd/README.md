@@ -1,269 +1,62 @@
-# AdBlock DNS sinkhole + four-colour e-paper dashboard
+# merged-adblock-epd 固件
 
-A merge of two projects, running on one **ESP32-S2 mini**:
+ESP32-S2 mini 上的 **DNS sinkhole + 四色电子纸仪表盘**固件。由两个 MIT 许可的
+上游项目合并而成：DNS 引擎来自
+[9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/ESP32-C3-AdBlocker)，
+电子纸驱动与绘图原语来自 [datascale-ai/inksight](https://github.com/datascale-ai/inksight)。
 
-| Half | Taken from | What we kept |
-|---|---|---|
-| DNS engine | [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/ESP32-C3-AdBlocker) | The whole blocking DNS server |
-| Renderer | InkSight ("墨鱼") | The e-paper driver, font and drawing primitives |
+> 本目录是固件源码。项目总览见仓库根的 [README.md](../../README.md)；
+> 完整的构建、烧写、配置与故障排查教程见 [GUIDE.md](../../GUIDE.md)。
 
-Everything InkSight did *around* the panel is gone: no cloud backend, no
-Next.js site, no mobile app, no 24 built-in modes, no LLM content. The
-screen no longer shows anything downloaded from someone else's server —
-it shows what this device itself blocked.
+## 目录结构
 
-## What it does
+* `src/` — 固件源码（DNS 引擎、电子纸驱动、Web 控制台）
+* `tools/` — 构建 / 字体 / 发布 / 烧写辅助脚本
+* `data/blocklist.bin` — 编译后的 blocklist 镜像
+* `partitions.csv` — flash 分区布局（两个 1.125 MB OTA slot + 1.625 MB LittleFS）
+* `platformio.ini` — 构建配置（env: `s2mini`）
+* `AGENTS.md` — 工程约束与不变量
 
-* Runs a DNS sinkhole on port 53 (UDP **and** TCP) that answers blocked
-  domains with `0.0.0.0` / `::`, and forwards everything else to
-  9.9.9.9.
-* Blocks from a 40-bit FNV-1a hash table in flash, pre-filtered by a
-  Bloom filter in RAM, plus a small editable custom list.
-* Per-client tracking (IP, MAC, blocked/allowed counters, ban toggle).
-* A self-contained Chinese console served from the firmware (Basic
-  Auth, no CDN, no external assets): live tiles, an hourly SVG chart,
-  the top-domain table, per-client rows with ban/unban, custom-domain
-  chips, the blocklist auto-update URL, firmware/blocklist upload and a
-  "refresh the screen now" button.
-* The e-paper panel, refreshed every 3 minutes, showing:
-  * **today's blocked count** as a big black number, with total queries
-    and the block rate;
-  * a **24-bar per-hour histogram** of blocked queries;
-  * the **top blocked domains** with hit counts;
-  * a footer with all-time totals, uptime and the last update time.
+## 构建与烧写
 
-## Hardware
-
-ESP32-S2 mini (verified on an **ESP32-S2FNR2**: 4 MB flash, 2 MB PSRAM)
-plus a 7.5 inch 768x552 four-colour panel, JDY79668 / GDEY075Z08 class,
-driven with the same wiring as InkSight's S2 profile:
-
-| Signal | GPIO |
-|---|---|
-| MOSI | 11 |
-| SCK | 7 |
-| CS | 12 |
-| DC | 17 |
-| RST | 16 |
-| BUSY | 4 |
-| Battery ADC | 6 |
-| Config button | 0 (BOOT) |
-| Status LED | 15 |
-
-## Why there is no full-frame buffer
-
-768 x 552 at 2 bpp is **105,984 bytes**. Internal DRAM is the real
-bottleneck on this chip: 176 KB total, shared with the WiFi stack, the
-DNS buffers and the tracker — and the link fails outright if a frame
-buffer of that size is made static. (2 MB of PSRAM *is* available on the
-S2FNR2 and is used deliberately for the 128 KB Bloom filter, but a
-106 KB canvas is traffic this screen — refreshed every three minutes —
-does not need.)
-
-So the picture is never materialised at all. `epdSendFrame()` renders
-and streams it **one 64-row band at a time** into a 12,288-byte static
-buffer (`s_bandBuf`, `BAND_BUF_LEN`). Each band redraws the whole screen
-through the clipped drawing helpers, so the layout code above stays
-band-agnostic, and the firmware keeps working on S2 mini variants that
-have no PSRAM.
-
-## Rotation
-
-Two transforms sit in the drawing path and they cancel out:
-
-* `drawTextColor()` / `fillRectColor()` map `px = W-1-px, py = H-1-py`;
-* `epdRowData()` emits the bytes of a row right-to-left and swaps the
-  four 2-bit pixels inside each byte.
-
-The driver also has to place each row in the right `0x83` window. The
-vendor driver writes one row at a time, every row with its own window, and
-its loop reduces in closed form: source data row `d` goes to window
-`2d+1` for `d < H/2` and to window `2(H-1-d)` for `d >= H/2`. The panel
-therefore interleaves the two halves of the frame in window space — the
-odd windows carry the first half of the image, the even windows carry the
-second half in reverse. A banded renderer that streams *logical* rows has
-to reproduce this exactly, so the window is always derived from the
-**data row** (`rBase + k`), never from a running counter.
-
-A counter that merely walks the panel top to bottom (`0,1,2,...`) instead
-is a subtle and total break: consecutive logical rows land two panel rows
-apart, the frame splits into two interleaved combs, and every byte is
-still accepted — the panel reports a healthy 15 s refresh while the
-picture on the glass is shredded. It was a photograph of the panel that
-caught it, not the logs.
-
-Net effect: the canvas is in normal logical coordinates. **Always draw
-through `drawTextColor` / `fillRectColor`; never index `colorBuf`
-directly**, or you will apply only one of the two transforms and end up
-with mirrored text.
-
-
-## Refresh cost, and why it runs in the background
-
-A frame costs two very different amounts of time:
-
-| phase | time | code |
-|---|---|---|
-| reset + power-on | ~0.24 s | `epdSendFrame()` |
-| stream all 106 KB (bit-bang) | ~1.1 s | `epdSendFrame()` |
-| **panel moving the pigments** | **~15.3 s** | `epdServiceRefresh()` |
-
-Every frame logs `[EPD] arm= rows= stream= refresh= off= total= ms`.
-**The `refresh` field is the panel health check**: ~15 s means the glass
-really refreshed; a few tens of milliseconds means the update was never
-accepted. That is exactly what a brief experiment with the hardware SPI
-peripheral produced - it made a frame look 35x faster (16.8 s to 0.47 s)
-while silently doing nothing, because the 15 s belongs to the panel, not
-to us. Measuring `digitalWrite` (370 ns/op, so ~1.1 s for the 3.03M calls
-a frame needs) is what exposed it, and bit-banging was kept as a result.
-
-15 s of blocking would stop the DNS engine answering queries every three
-minutes, so the transfer is split in two. `epdSendFrame()` streams the
-bands and issues the `0x12` update command, then returns at once;
-`loop()` calls `epdServiceRefresh()`, which waits for BUSY to go high and
-only then sends `0x02` to power the panel down. The network therefore
-keeps running for the whole refresh, and a new frame simply waits for any
-refresh already in flight (`epdWaitRefresh()`).
-## Build
+在本目录内运行（或从仓库根用 `python -m platformio run -d 3.98/merged-adblock-epd`）：
 
 ```bash
-python -m pip install --upgrade platformio
-python -m platformio run -d .
-python -m platformio run -d . -t upload
+pio run                  # 构建
+pio run -t upload        # 烧写应用程序
+pio run -t uploadfs      # 烧写文件系统（LittleFS，含 blocklist）
+pio run -t buildfs       # 构建 LittleFS 镜像（合成发行镜像前必须先跑）
+python tools/make_release.py   # 合成 firmware-merged.bin（含 LittleFS，从 0x0 烧写）
 ```
 
-The flash layout in `partitions.csv` spends the 4 MB as two 1.125 MB
-OTA app slots (the image is ~1.0 MB, so OTA-updating works) plus a
-**1.625 MB** LittleFS partition for the blocklist — enough for the
-default StevenBlack + Hagezi Light list, which is ~200k domains: a 128 KB
-Bloom filter plus 5 bytes per hash, about 1.1 MB.
-
-### Flashing
-
-`python -m platformio run -d . -t upload` writes the four images to their
-own offsets. If you would rather have a single file — for a browser
-flasher, or to hand to someone else — merge them first:
-
-```bash
-python tools/make_release.py
-```
-
-That writes `firmware-merged.bin`, which is flashed at offset 0. It
-bundles the LittleFS image too (run `-t buildfs` first), so one file
-gives you a device that actually blocks something; pass `--no-fs` to
-leave the blocklist out. The image is ~2.8 MB with the default list:
+合成镜像用 esptool 从偏移 `0x0` 烧写：
 
 ```bash
 esptool.py --chip esp32s2 write_flash 0x0 firmware-merged.bin
 ```
 
-`tools/make_release.py` holds the offsets in `LAYOUT`; if you change
-`partitions.csv`, change them there too.
-
-## Blocklist
-
-`tools/build_blocklist.py` produces the `/blocklist.bin` blob (20-byte
-header + Bloom filter + sorted 40-bit hashes). The format and the
-constants are identical to the upstream project — `HASH_BYTES = 5`,
-magic `CADB`.
+## blocklist
 
 ```bash
-python tools/build_blocklist.py blocklist.bin
+python tools/build_blocklist.py data/blocklist.bin
 ```
 
-Then either upload it through the web dashboard, or:
+格式（magic `CADB`、`HASH_BYTES = 5`、flash 中的 40-bit FNV-1a 哈希 + RAM
+Bloom 预过滤）与上游项目**字节兼容**。构建好的镜像通过
+`pio run -t uploadfs` 烧写，或经 Web 控制台上传 / 远程 URL 自动更新。
 
-```bash
-python -m platformio run -t uploadfs
-```
+## 关键工程约束（摘录）
 
-with `blocklist.bin` in `data/`.
+* **没有全帧缓冲**：768×552 @ 2 bpp 约 106 KB，放不进与 WiFi 共享的内部
+  DRAM；画面按 **64 行 band** 流式渲染进 12,288 字节静态缓冲。
+* **绝不阻塞 `loop()`**：帧传输约 1.1 s，其后面板刷新约 15 s 由
+  `epdServiceRefresh()` 在后台完成；`[EPD]` 日志行的 `refresh=` 字段是面板
+  健康检查（~15 s = 真刷新，几毫秒 = 更新未被接受）。
+* **只用 `drawTextColor()` / `fillRectColor()` 绘制**，每行的 `0x83` window
+  必须由其**数据行**推导，绝不用运行计数器。
+* **UDP DNS 有约 6 个数据报的 burst ceiling**（lwIP 预编译库的
+  `CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6`），已实测、已接受，不是 bug。
 
-## Logging in
-
-The device generates a random 10-character password on first boot and
-stores it in `/auth.cfg` on LittleFS along with a CSRF token. Browsing
-to `http://adblock.local/` (or the IP shown in the panel header)
-prompts for it: **user `admin`**, with that password.
-
-The password is printed on **every** boot, as an `[AUTH] admin account:
-user admin password ...` line on the serial console (115200 baud). That
-is deliberate: the console is behind Basic Auth, so a password that were
-only printed once would be unrecoverable, and the serial port is already
-physical access to the device. Deleting `/auth.cfg` from LittleFS is
-what asks the firmware to generate a new one.
-
-The console is the chip's **native USB CDC port** (there is no UART
-bridge), so it only appears once a host has the port open — the firmware
-waits up to 5 s at boot for that and prints a `[HB]` status line every
-5 s thereafter (uptime, IP, domain count, blocked/total, top domain,
-free heap and PSRAM). On macOS/Linux that is the `USB JTAG/serial`
-device; on Windows it enumerates as `USB 串行设备 (COMx)`.
-
-## Getting it on the network
-
-Credentials are tried in this order, and the first one that exists wins:
-
-1. `/wifi.cfg` on LittleFS, written by the setup portal (the network
-   card in the console, or `POST /setwifi` with `ssid` and `pass`);
-2. the compile-time `WIFI_SSID` / `WIFI_PASS` in `src/secrets.h`, unless
-   they are still the shipped placeholders;
-3. the ESP-IDF driver's own NVS store (`WiFi.begin()` with no
-   arguments). This is not a corner case: the panel this firmware was
-   ported from saved its network through its own web app, so a board
-   that has already been in service joins that network with no setup at
-   all. The stored SSID is logged, the password is not.
-
-If none of them work the device opens the **AdBlock-Setup** access point
-with a setup page at `http://192.168.4.1/` (the AP itself is open), and
-paints a matching screen so the two states can be told apart without a
-serial console. To get back into that portal on a board that is already
-configured — after changing the router's password, say — **hold the BOOT
-button for 3 seconds**: the firmware brings the access point back up
-from the main loop and repaints the panel. A short press just repaints
-the dashboard. If the link drops, the loop also reconnects on its own
-every 30 s, and falls back to the portal after six failed attempts.
-
-Then point something at it. The device is a plain DNS server on port 53
-(UDP and TCP), so either set it as the DNS server on the clients you
-care about, or — better — set it as the upstream in your router so
-everything on the network goes through it:
-
-```
-primary DNS   -> the IP in the panel header (e.g. 192.168.10.190)
-secondary DNS -> anything except a second sinkhole, or it will answer
-                 the queries the first one is supposed to swallow
-```
-
-It does not run a DHCP server by default, so it never has to be the
-gateway, only the resolver. Queries against it either come back as
-`0.0.0.0` / `::` (blocked) or as the real answer forwarded from
-9.9.9.9.
-
-## Throughput, and the burst ceiling
-
-A household resolver sees single-digit queries per second, and at that
-load the device is lossless. Sustained load only starts to bite around
-100 qps:
-
-| offered rate | loss |
-|---|---|
-| ≤ 50 qps | 0% |
-| ~100 qps | ~44% |
-| ~200 qps | ~77% |
-| ~300 qps | ~87% |
-
-The limit is a **single-burst ceiling of about six datagrams**, not a
-throughput wall: pulse twenty queries at once and the first six are
-answered, the rest discarded. It is lwIP's UDP receive mailbox depth
-(`CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6`) in the pre-compiled `liblwip.a`,
-so anything past the sixth packet is dropped before the firmware's DNS
-code ever sees it. Spacing the same twenty out at 10 ms apart recovers
-18-19 of them, which is why ordinary traffic is unaffected and why DNS
-clients (which retry on timeout) ride it out.
-
-This is accepted as a known limit rather than patched: the fixes — a
-rebuilt lwIP with a deeper mailbox, or a raw-PCB `udp_recv()` callback —
-are not worth it for a home network. A drain loop around `parsePacket()`
-only clears what is already queued; it cannot recover packets lwIP has
-already dropped.
+完整规则与实测推理见 [`AGENTS.md`](AGENTS.md)，通俗版见
+[详细指南的架构说明](../../GUIDE.md#17-架构说明)与
+[性能与已知上限](../../GUIDE.md#15-性能与已知上限)。

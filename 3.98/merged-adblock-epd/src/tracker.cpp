@@ -2,7 +2,7 @@
 #include <LittleFS.h>
 #include <time.h>
 
-// ── Storage ──────────────────────────────────────────────────
+// ── 存储 ────────────────────────────────────────────────────
 static TopEntry top[TOPN_KEEP];
 static int      topCount = 0;
 
@@ -14,21 +14,21 @@ static uint32_t allBlocked   = 0, allTotal   = 0;
 
 static const char* TOTALS_PATH = "/totals.cfg";
 
-// ── Helpers ──────────────────────────────────────────────────
-// Current local hour, or -1 if the clock has not synced yet. The
-// histogram simply skips un-timed traffic rather than bucketing it
-// into hour 0, which would make midnight look artificially busy.
+// ── 辅助函数 ────────────────────────────────────────────────
+// 当前本地小时，时钟尚未同步时返回 -1。直方图直接跳过
+// 没有时间戳的流量，而不是把它塞进 0 时槽位——那会让午夜
+// 显得人为地繁忙。
 static int histHourNow() {
   time_t now = time(nullptr);
-  if (now < 1700000000) return -1;   // before Nov 2023 => NTP has not landed
+  if (now < 1700000000) return -1;   // 早于 2023 年 11 月 => NTP 尚未同步
   struct tm t;
   localtime_r(&now, &t);
   return t.tm_hour;
 }
 
-// Keep the first TOPN_KEEP entries sorted by count, descending, so
-// trackerGetTop() is a plain copy of a prefix. Sinking one entry with
-// a swap loop is O(n) on a list that is at most 12 long.
+// 保持前 TOPN_KEEP 个条目按计数降序排列，这样 trackerGetTop()
+// 只需原样复制一个前缀。用交换循环把一个条目下沉，在最长
+// 12 个条目的列表上是 O(n)。
 static void demoteIfNeeded(int idx) {
   while (idx + 1 < topCount && top[idx].count < top[idx + 1].count) {
     TopEntry tmp = top[idx];
@@ -38,7 +38,7 @@ static void demoteIfNeeded(int idx) {
   }
 }
 
-// ── Init / persistence ───────────────────────────────────────
+// ── 初始化 / 持久化 ─────────────────────────────────────────
 void trackerInit() {
   topCount = 0;
   for (int i = 0; i < HIST_SLOTS; i++) { histBlocked[i] = 0; histTotal[i] = 0; }
@@ -63,16 +63,17 @@ void trackerSave() {
   f.close();
 }
 
-// ── Day rollover ─────────────────────────────────────────────
+// ── 日切换 ──────────────────────────────────────────────────
 void trackerRollDay() {
   todayBlocked = todayTotal = 0;
   topCount = 0;
   for (int i = 0; i < HIST_SLOTS; i++) { histBlocked[i] = 0; histTotal[i] = 0; }
 }
 
-// ── Recording ────────────────────────────────────────────────
-// Runs on every DNS query, so it stays allocation-free and bounded:
-// one linear scan over at most 12 entries, no String, no malloc.
+// ── 记录 ────────────────────────────────────────────────────
+// 每个 DNS 查询都会执行到这里，因此必须保持无内存分配且有
+// 确定上界：只对最多 12 个条目做一次线性扫描，不用 String，
+// 不用 malloc。
 void trackerRecord(const char* domain, bool blocked) {
   if (blocked) { todayBlocked++; allBlocked++; } else { todayTotal++; allTotal++; }
 
@@ -96,7 +97,7 @@ void trackerRecord(const char* domain, bool blocked) {
   }
 }
 
-// ── Accessors ────────────────────────────────────────────────
+// ── 访问器 ──────────────────────────────────────────────────
 void trackerGetTop(TopEntry* out, int n) {
   if (n > TOPN_KEEP) n = TOPN_KEEP;
   for (int i = 0; i < n; i++) {

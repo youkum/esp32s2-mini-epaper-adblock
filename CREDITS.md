@@ -1,89 +1,77 @@
-# Credits & Open-Source Attribution
+# 开源署名（Credits）
 
-This project is a **derivative work**. It would not exist without the
-projects below, and every one of them is credited here rather than buried
-in a source comment. All upstream components are **MIT licensed**; their
-full license texts are reproduced verbatim at the bottom of this file.
+本项目是**衍生作品**。没有下面这些项目它就不会存在；每一项都在此署名，
+而不是埋在源码注释里。所有上游组件均以 **MIT** 许可；其许可证全文在
+本文件末尾逐字转载。
 
-If you are an upstream author and want the wording here changed, open an
-issue — attribution corrections are always welcome.
+若你是上游作者、希望修改这里的措辞，请开一个 issue——署名更正随时欢迎。
 
 ---
 
-## 1. DNS engine — 9M2PJU / ESP32-C3-AdBlocker
+## 1. DNS 引擎 — 9M2PJU / ESP32-C3-AdBlocker
 
-* **Repository**: <https://github.com/9M2PJU/ESP32-C3-AdBlocker>
-* **License**: MIT — Copyright (c) 2026 zed
-* **What this project took**:
-  * The whole blocking DNS server (UDP + TCP on port 53).
-  * The 40-bit FNV-1a hash blocklist format: sorted hashes in flash, magic
-    `CADB`, `HASH_BYTES = 5`, binary search, and the RAM Bloom pre-filter.
-  * The asynchronous upstream-forwarding design (rewrite the query ID, keep
-    a pending table, match the reply back to the client).
-  * `tools/build_blocklist.py` and `tools/test_build_blocklist.py`, which
-    stay byte-compatible with that format.
-  * Much of the web-console interaction model (Basic Auth, CSRF token,
-    ban/unban, custom-domain list, remote blocklist URL).
+* **仓库**： <https://github.com/9M2PJU/ESP32-C3-AdBlocker>
+* **许可证**： MIT — Copyright (c) 2026 zed
+* **本项目采用了**：
+  * 整个拦截用 DNS 服务器（端口 53，UDP + TCP 双栈）。
+  * 40-bit FNV-1a 哈希 blocklist 格式：flash 中的排序哈希、magic
+    `CADB`、`HASH_BYTES = 5`、二分查找，以及 RAM 中的 Bloom 预过滤。
+  * 异步上游转发设计（改写查询 ID、维护 pending 表、把应答匹配回客户端）。
+  * `tools/build_blocklist.py` 与 `tools/test_build_blocklist.py`，与该格式
+    保持字节兼容。
+  * Web 控制台的大部分交互模型（Basic Auth、CSRF token、ban/unban、
+    自定义域名列表、远程 blocklist URL）。
 
-The blocklist **file format is intentionally kept identical** to the
-upstream project, so a `blocklist.bin` built for either firmware loads in
-the other.
+blocklist 的**文件格式刻意与上游项目保持完全一致**，为任一固件构建的
+`blocklist.bin` 都可以直接装入另一个。
 
-## 2. E-paper renderer — InkSight (墨鱼)
+## 2. 电子纸渲染器 — InkSight（墨鱼）
 
-* **Repository**: <https://github.com/datascale-ai/inksight>
-* **Project site**: <https://www.inksight.site/>
-* **License**: MIT — Copyright (c) 2026 datascale-ai
-* **What this project took**:
-  * The JDY79668 / GDEY075Z08-class 7.5" four-colour e-paper driver
-    (`epd_driver.cpp` / `epd_driver.h`), including the panel-specific
-    power-on sequence, the `0x83` row-window interleave and the
-    bit-banged SPI transfer.
-  * The drawing primitives and the two cancelling rotation transforms
-    (`display.cpp` / `display.h`).
-  * The ESP32-S2 mini pin profile.
-  * The generated Chinese glyph-table approach (`cjk_font.cpp` +
-    `tools/gen_cjk_font.py`).
+* **仓库**： <https://github.com/datascale-ai/inksight>
+* **项目主页**： <https://www.inksight.site/>
+* **许可证**： MIT — Copyright (c) 2026 datascale-ai
+* **本项目采用了**：
+  * JDY79668 / GDEY075Z08 class 的 7.5 英寸四色电子纸驱动
+    （`epd_driver.cpp` / `epd_driver.h`），含面板专属的上电时序、
+    `0x83` 行窗交错与 bit-bang SPI 传输。
+  * 绘图原语与两个相互抵消的旋转变换（`display.cpp` / `display.h`）。
+  * ESP32-S2 mini 引脚配置。
+  * 生成式中文字形表方案（`cjk_font.cpp` + `tools/gen_cjk_font.py`）。
 
-**What was deliberately *not* taken**: InkSight's cloud backend, Next.js
-web app, mobile app, the 24 built-in "modes", the LLM content pipeline and
-the online flashing flow. This firmware is a self-contained sinkhole; it
-never talks to `inksight.site` or any other remote service. See
-`AGENTS.md` for the standing rule.
+**刻意*没有*采用的部分**：InkSight 的云后端、Next.js 网站、手机 App、
+24 个内置「模式」、LLM 内容管线与在线烧写流程。本固件是自成一体的
+sinkhole，从不与 `inksight.site` 或任何远程服务通信。长期规则见
+`AGENTS.md`。
 
-## 3. Blocklist data sources
+## 3. blocklist 数据来源
 
-The default `blocklist.bin` is built from these community lists. They are
-**data**, not code, and carry their own licenses (both are permissive;
-check the repositories for the current terms before redistributing a
-derived list):
+默认的 `blocklist.bin` 由以下社区列表构建。它们是**数据**而非代码，各自
+携带自己的许可（两者均较宽松；再分发派生列表前请查看相应仓库的最新条款）：
 
 * **StevenBlack/hosts** — <https://github.com/StevenBlack/hosts>
-  (default `hosts`, MIT).
+  （默认 `hosts` 列表，MIT）。
 * **hagezi/dns-blocklists** — <https://github.com/hagezi/dns-blocklists>
-  (`light-onlydomains.txt`, GPL-3.0 for the list data).
+  （`light-onlydomains.txt`，列表数据为 GPL-3.0）。
 
-The shipped `data/blocklist.bin` is a compiled hash table of the union of
-these two (about 103,000 domains), not a copy of either file.
+随固件附带的 `data/blocklist.bin` 是两者并集编译成的哈希表
+（约 103,000 个域名），不是任一文件的拷贝。
 
-## 4. Platform & toolchain (fetched by PlatformIO, not vendored here)
+## 4. 平台与工具链（由 PlatformIO 拉取，未随仓库分发）
 
-* **PlatformIO** — <https://platformio.org/> (Apache-2.0)
-* **Arduino-ESP32 core** (Espressif) — <https://github.com/espressif/arduino-esp32>
-  (LGPL-2.1)
-* **ESP-IDF** (Espressif) — <https://github.com/espressif/esp-idf>
-  (Apache-2.0), including the pre-compiled **lwIP** stack
-  (`CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6` — see the burst-ceiling note in
-  `AGENTS.md`).
-* **esptool** — <https://github.com/espressif/esptool> (GPL-2.0)
-* **SimHei** (`simhei.ttf`) — the Windows system font used **offline** by
-  `tools/gen_cjk_font.py` to rasterise glyphs. Only the resulting 16×16
-  bitmaps are committed; no font file is redistributed.
-* **Node.js** — used by the `tools/*.js` helper scripts (MIT).
+* **PlatformIO** — <https://platformio.org/>（Apache-2.0）
+* **Arduino-ESP32 core**（Espressif）— <https://github.com/espressif/arduino-esp32>
+  （LGPL-2.1）
+* **ESP-IDF**（Espressif）— <https://github.com/espressif/esp-idf>
+  （Apache-2.0），含预编译的 **lwIP** 协议栈
+  （`CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6` — burst ceiling 说明见 `AGENTS.md`）。
+* **esptool** — <https://github.com/espressif/esptool>（GPL-2.0）
+* **SimHei**（`simhei.ttf`）— `tools/gen_cjk_font.py` **离线**栅格化字形所用的
+  Windows 系统字体。仓库只提交生成的 16×16 点阵，不随仓库再分发字体文件。
+* **Node.js** — `tools/*.js` 辅助脚本使用（MIT）。
 
 ---
 
-## Full license texts
+## 许可证全文
 
 ### 9M2PJU/ESP32-C3-AdBlocker
 

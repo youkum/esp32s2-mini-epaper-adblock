@@ -1,5 +1,5 @@
 #pragma once
-// WiFi credentials. On first boot these are used only if /wifi.cfg
-// does not exist yet; after that the dashboard's config page owns them.
+// WiFi 凭据。首次启动时仅当 /wifi.cfg 尚不存在才使用这些值；
+// 此后由仪表盘的配置页面接管。
 #define WIFI_SSID "your-ssid"
 #define WIFI_PASS "your-password"

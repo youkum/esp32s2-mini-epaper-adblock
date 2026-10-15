@@ -3,27 +3,26 @@
 
 #include <Arduino.h>
 
-// ── E-paper dashboard ────────────────────────────────────────
-// Renders the block statistics onto the 768x552 four-colour panel.
+// ── E-Paper 仪表盘 ───────────────────────────────────────────
+// 将拦截统计渲染到 768x552 四色面板上。
 //
-// The picture is never materialised as a whole image: epd_driver
-// streams the panel one band at a time and calls back here for each
-// band, so both screens below redraw themselves once per band. See
-// epd_driver.h for the band contract and display.h for the canvas
-// helpers that clip drawing to the active band.
+// 整幅画面从不作为完整图像一次性生成：epd_driver 逐 band 流式
+// 驱动面板，并为每个 band 回调到这里，因此下面两个屏幕各自
+// 在每个 band 重绘一次。band 契约见 epd_driver.h，把绘制裁剪
+// 到当前 band 的 canvas 辅助函数见 display.h。
 //
-// Colour semantics (fixed by design):
-//   black  — data / labels
-//   red    — today's blocking headline figure, alarms
-//   yellow — secondary highlights, ranking accents
-//   white  — background
+// 颜色语义（设计上固定不变）：
+//   black  — 数据 / 标签
+//   red    — 今日拦截的主数字、告警
+//   yellow — 次要高亮、排行榜点缀
+//   white  — 背景
 
-// Full dashboard: headline counters, top-blocked list, hourly bars and
-// a footer with uptime and last-refresh time. Flushes the panel.
+// 完整仪表盘：主计数、拦截最多的域名列表、每小时柱状条，
+// 以及含运行时长与最后刷新时间的页脚。会刷新面板。
 void dashboardDraw();
 
-// Simple message screen, used for boot / errors / setup. Lines are
-// copied, so they need not outlive the call. Flushes the panel.
+// 简单消息屏，用于启动 / 出错 / 配置场景。文本会被复制，
+// 因此调用结束后不必继续有效。会刷新面板。
 void dashboardMessage(const char* line1, const char* line2, const char* line3);
 
 #endif // ADBLOCK_DASHBOARD_H

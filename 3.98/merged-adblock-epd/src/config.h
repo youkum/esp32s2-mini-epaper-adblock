@@ -3,9 +3,9 @@
 
 #include <Arduino.h>
 
-// ── Board profile ────────────────────────────────────────────
-// Pins for the ESP32-S2 mini wired to the 7.5" JDY79668 panel,
-// carried over from InkSight's S2 profile.
+// ── 板型配置 ─────────────────────────────────────────────────
+// ESP32-S2 mini 连接 7.5" JDY79668 面板的引脚定义，
+// 沿自 InkSight 的 S2 板型配置。
 #if defined(BOARD_PROFILE_ESP32_S2_MINI)
   #define PIN_EPD_MOSI   11
   #define PIN_EPD_SCK    7
@@ -30,8 +30,8 @@
   #error "Unsupported board profile"
 #endif
 
-// ── Panel geometry ───────────────────────────────────────────
-// 768x552 four-colour, 2 bits per pixel.
+// ── 面板几何参数 ─────────────────────────────────────────────
+// 768x552 四色，每像素 2 位。
 #define EPD_WIDTH   768
 #define EPD_HEIGHT  552
 #define EPD_BPP     2
@@ -39,63 +39,62 @@
 static const int W = EPD_WIDTH;
 static const int H = EPD_HEIGHT;
 
-// Rows rendered and streamed per band. The driver gives every row its
-// own panel window (the vendor sequence does the same), so this only
-// sets how much of the screen is redrawn before the next band.
+// 每个 band 渲染并流式发送的行数。驱动为每一行设置各自的
+// 面板窗口（厂商时序也是如此），因此这里只决定进入下一个
+// band 之前重绘多少屏幕区域。
 #define EPD_CHUNK_ROWS 64
 
-// A full 2bpp canvas would be (768*552)/4 = 105,984 bytes, which the S2
-// cannot spare alongside WiFi. The image is rendered one band at a time
-// into a buffer this size and streamed straight to the panel; see
-// epdSendFrame() in epd_driver.cpp and canvasBindBand() in display.cpp.
+// 完整的 2bpp 画布需要 (768*552)/4 = 105,984 字节，S2 在同时
+// 运行 WiFi 的情况下拿不出这么多内存。图像改为按 band 逐块
+// 渲染到这么大的缓冲区并直接流式发送到面板；参见
+// epd_driver.cpp 中的 epdSendFrame() 与 display.cpp 中的
+// canvasBindBand()。
 static const int BAND_ROW_BYTES = W / 4;                        // 192
 static const int BAND_BUF_LEN   = EPD_CHUNK_ROWS * (W / 4);     // 12,288
 
-// Base of the band currently being drawn into.
+// 当前正在绘制的 band 的基地址。
 extern uint8_t* colorBuf;
 
-// ── Refresh policy ───────────────────────────────────────────
-// A four-colour full refresh flashes the panel and costs seconds of
-// bit-banged SPI. Dashboards are polled, not watched, so the period
-// is measured in minutes.
+// ── 刷新策略 ─────────────────────────────────────────────────
+// 四色全刷会让面板闪烁，并消耗数秒的 bit-bang 方式模拟 SPI 的
+// 时间。仪表盘是被人偶尔查看的，不是被人一直盯着的，因此刷新
+// 周期以分钟计。
 static const uint32_t DASH_REFRESH_MS = 3UL * 60UL * 1000UL;
 
-// ── Filesystem ───────────────────────────────────────────────
-// Arduino's LittleFS.begin() defaults to the partition label "spiffs" and
-// fails to both mount and format any partition named otherwise, so the
-// label from partitions.csv has to be passed explicitly.
+// ── 文件系统 ─────────────────────────────────────────────────
+// Arduino 的 LittleFS.begin() 默认使用分区标签 "spiffs"，对其他
+// 名称的分区既无法挂载也无法格式化，因此必须显式传入
+// partitions.csv 中的标签。
 #define LFS_PARTITION "littlefs"
 
-// ── Network defaults ─────────────────────────────────────────
+// ── 网络默认值 ───────────────────────────────────────────────
 #define AP_SSID_DEFAULT   "AdBlock-Setup"
 static const int WIFI_TIMEOUT = 15000;      // ms
-static const uint32_t LIVE_WIFI_RETRY_MS = 30000;  // back-off before WiFi.reconnect()
+static const uint32_t LIVE_WIFI_RETRY_MS = 30000;  // 调用 WiFi.reconnect() 之前的退避等待
 static const uint32_t HTTP_TIMEOUT_MS = 30000;
 #define NTP_UTC_OFFSET  (8 * 3600)
 
-// Debounce for the config button, so a bounce does not count as a press.
+// 配置按键的去抖时间，避免机械抖动被计为一次按压。
 static const uint32_t SHORT_PRESS_MIN_MS = 50;
 
-// Panel gesture thresholds. A short press redraws the dashboard; holding
-// the button for this much longer reopens the setup portal, which is the
-// only way back into the WiFi form once the board is out of reach of the
-// network it was configured for.
+// 面板手势阈值。短按重绘仪表盘；再多按住这么久则重新打开
+// 配置门户——当板子离开了它当初配置的 WiFi 网络的覆盖范围时，
+// 这是回到 WiFi 配置表单的唯一途径。
 static const uint32_t CFG_BTN_HOLD_MS    = 3000;
 static const uint32_t BTN_POLL_MS        = 20;
 
-// How many consecutive failed reconnect attempts (one every
-// LIVE_WIFI_RETRY_MS) before the board gives up on the stored credentials
-// and opens the portal by itself. Sitting there retrying a network the
-// board has no business on is worse than asking for a new password.
+// 连续重连失败多少次（每 LIVE_WIFI_RETRY_MS 一次）后，板子才
+// 放弃已存凭据并自行打开配置门户。守着一个根本不该连的网络
+// 反复重试，还不如直接向人要一个新密码。
 static const uint8_t WIFI_RETRY_BEFORE_PORTAL = 6;
 
-// Seconds the panel keeps the "no WiFi" notice up before it takes the
-// portal route on its own. The device is unusable as a sinkhole either
-// way, so the notice exists only to give someone a chance to fix the
-// router; after this it makes itself reachable instead.
+// 面板把「无 WiFi」提示多显示这么多秒，之后才自行转入配置
+// 门户。无论走哪条路，设备此时都已无法充当 sinkhole，所以这个
+// 提示只是给人一个去修路由器的机会；超过时限后它转而让自己
+// 变得可访问。
 static const uint32_t WIFI_GIVEUP_MS = 300000;
 
-// ── DNS engine ───────────────────────────────────────────────
+// ── DNS 引擎 ─────────────────────────────────────────────────
 static const char* DNS_HOSTNAME = "adblock";
 
 #endif // ADBLOCK_CONFIG_H

@@ -2,9 +2,9 @@
 #include "config.h"
 #include "cjk_font.h"
 
-// ── Unified 5x7 pixel font ───────────────────────────────────
-// Each glyph is 5 columns x 7 rows, stored column-major.
-// Bit 0 = top row, bit 6 = bottom row.
+// ── 统一的 5x7 像素点阵字体 ─────────────────────────────────
+// 每个字模为 5 列 x 7 行，按列存储（column-major）。
+// bit 0 = 顶行，bit 6 = 底行。
 
 const uint8_t* getGlyph(char c) {
   static const uint8_t g_A[] = {0x7E,0x11,0x11,0x11,0x7E};
@@ -112,8 +112,8 @@ const uint8_t* getGlyph(char c) {
   }
 }
 
-// Pixel width of a UTF-8 string: Chinese glyphs are full width (16*scale),
-// ASCII is 6*scale per character, minus the trailing spacing column.
+// UTF-8 字符串的像素宽度：中文字模为全宽（16*scale），ASCII 每字符
+// 占 6*scale，末尾再减去一个间隔列。
 int textWidth(int charCount, int scale) {
   if (charCount <= 0) return 0;
   return charCount * (5 * scale + scale) - scale;
@@ -136,21 +136,19 @@ int utf8Len(const char* msg) {
   return n;
 }
 
-// ── Banded canvas ────────────────────────────────────────────
-// colorBuf holds one band of the panel, not the whole picture. Rows
-// are addressed in pre-rotation space: logical row py lands on
-// pre-rotation row H-1-py, and the band starts at s_bandRBase.
+// ── 分带画布（banded canvas）─────────────────────────────────
+// colorBuf 只保存面板的一个分带，而非整幅画面。行地址按旋转前空间
+// 计算：逻辑行 py 对应旋转前行 H-1-py，分带从 s_bandRBase 开始。
 static int s_bandRBase = 0;
 static int s_bandRows  = 0;
 
-// Logical-y rows that this band can actually show. plotPixel() clips with
-// r = (H-1-y) - s_bandRBase in [0, s_bandRows), which inverts to this
-// inclusive span. The banded renderer redraws the whole screen once per
-// band, so the helpers below use this to skip glyphs and rectangles that
-// fall entirely outside the current band instead of walking their pixels
-// only to have plotPixel() drop each one.
+// 当前分带实际能显示的逻辑 y 行范围。plotPixel() 以 r = (H-1-y) -
+// s_bandRBase 必须落在 [0, s_bandRows) 内做裁剪，反解后即此闭区间。
+// 分带渲染器每带都会整屏重绘一遍，因此下面的辅助函数用它直接跳过
+// 完全落在当前分带之外的字模与矩形，而不是逐像素走一遍、最后全被
+// plotPixel() 丢弃。
 static inline void bandYRanges(int* topIncl, int* botIncl) {
-  *topIncl = H - s_bandRBase - s_bandRows;   // may be < 0 for the last band
+  *topIncl = H - s_bandRBase - s_bandRows;   // 最后一个分带时可能 < 0
   *botIncl = H - 1 - s_bandRBase;            // <= H-1
 }
 
@@ -166,38 +164,37 @@ void canvasBindBand(uint8_t* buf, int rBase, int rows) {
   colorBuf    = buf;
   s_bandRBase = rBase;
   s_bandRows  = rows;
-  memset(buf, 0x55, (size_t)rows * (W / 4));   // 0x55 = all COLOR_WHITE
+  memset(buf, 0x55, (size_t)rows * (W / 4));   // 0x55 = 每个像素均为 COLOR_WHITE
 }
 
-// ── Canvas writes ────────────────────────────────────────────
-// The panel is driven through epdWriteMapped2bpp(), which applies its
-// own 180-degree rotation. These helpers apply the matching rotation
-// as they write, so callers work in plain logical coordinates with
-// (0,0) at the top-left of the finished image.
+// ── 画布写入 ─────────────────────────────────────────────────
+// 面板经由 epdWriteMapped2bpp() 驱动，后者自带 180 度旋转。
+// 这些辅助函数在写入时施加配套的旋转，因此调用方使用普通逻辑坐标
+// 即可，(0,0) 位于成品图像的左上角。
 //
-// Canvas layout: 2 bits per pixel, 4 pixels per byte, most-significant
-// pixel first (bit 6-7 = leftmost). COLOR_* values are the panel's raw
-// codes, so they are written through unchanged.
+// 画布布局：每像素 2 位，每字节 4 像素，最高位像素在前
+// （bit 6-7 = 最左像素）。COLOR_* 各值即面板的原始编码，因此
+// 原样写入、不做转换。
 
-// Write one pixel through the canvas transform, clipped to the band.
+// 经画布变换写入单个像素，并裁剪到当前分带。
 static inline void plotPixel(int x, int y, uint8_t color) {
   int px = W - 1 - x;
   int py = H - 1 - y;
-  int r = py - s_bandRBase;             // row within the current band
+  int r = py - s_bandRBase;             // 当前分带内的行号
   if (px < 0 || px >= W || r < 0 || r >= s_bandRows) return;
   int pos = r * (W / 4) + px / 4;
   int shift = 6 - ((px % 4) * 2);
   colorBuf[pos] = (colorBuf[pos] & ~(0x03 << shift)) | (color << shift);
 }
 
-// A 16x16 Chinese glyph scaled by `scale` (full width 16*scale), or a
-// 5x7 ASCII glyph (advance 6*scale). Returns the advance consumed.
+// 绘制按 `scale` 缩放的 16x16 中文字模（全宽 16*scale），或 5x7
+// ASCII 字模（步进 6*scale）。返回消耗的步进宽度。
 static int drawOneGlyph(const char* p, int x, int y, int scale, uint8_t color) {
   if ((uint8_t)p[0] >= 0xE0 && (uint8_t)p[1] && (uint8_t)p[2]) {
     const uint8_t* g = cjkGlyph(p);
     if (g) {
-      // Skip the whole glyph when its line box misses this band; the
-      // advance is returned either way so layout stays identical.
+      // 字模的行框不落在当前分带时整字跳过；无论是否真正绘制，
+      // 步进都照常返回，以保证排版完全一致。
       if (rowsHitBand(y, CJK_GLYPH_H * scale)) {
         for (int row = 0; row < CJK_GLYPH_H; row++) {
           uint8_t hi = g[row * 2], lo = g[row * 2 + 1];
@@ -212,7 +209,7 @@ static int drawOneGlyph(const char* p, int x, int y, int scale, uint8_t color) {
       }
       return CJK_GLYPH_W * scale;
     }
-    return CJK_GLYPH_W * scale;   // unknown character: leave a blank cell
+    return CJK_GLYPH_W * scale;   // 未知字符：留一个空白格
   }
 
   const uint8_t* glyph = getGlyph(p[0]);
@@ -226,14 +223,14 @@ static int drawOneGlyph(const char* p, int x, int y, int scale, uint8_t color) {
       }
     }
   }
-  return 5 * scale + scale;   // 5 columns plus one column of spacing
+  return 5 * scale + scale;   // 5 列字模加 1 列间隔
 }
 
-// A line that contains at least one full-width glyph is laid out on a
-// CJK_GLYPH_H * scale line box. The 5x7 ASCII face is less than half that
-// tall, so centring it in the same box is what makes "累计 254" look like one
-// line instead of digits floating at the top. Pure-ASCII lines keep y as
-// their own top, so headings and the big counter are unaffected.
+// 只要一行里含至少一个全宽字模，整行就按 CJK_GLYPH_H * scale 的
+// 行框排版。5x7 的 ASCII 字面高度不到它的一半，因此把 ASCII 垂直
+// 居中放进同一个行框，才能让「累计 254」看起来像一行，而不是数字
+// 悬在顶部。纯 ASCII 行仍以 y 作为自身顶部，因此标题与大号计数器
+// 不受影响。
 void drawTextColor(const char* msg, int x, int y, int scale, uint8_t color) {
   if (!colorBuf) return;
   int asciiDy = 0;
@@ -244,8 +241,8 @@ void drawTextColor(const char* msg, int x, int y, int scale, uint8_t color) {
   for (const char* p = msg; *p; ) {
     bool wide = ((uint8_t)*p >= 0xE0);
     int adv = drawOneGlyph(p, cx, y + (wide ? 0 : asciiDy), scale, color);
-    // UTF-8: a lead byte >= 0xE0 means a three-byte character; anything
-    // else here is ASCII. (Two-byte sequences are not used by the UI.)
+    // UTF-8：首字节 >= 0xE0 表示三字节字符；此处其余均为 ASCII。
+    // （UI 不使用两字节序列。）
     p += wide ? 3 : 1;
     cx += adv;
   }
@@ -254,9 +251,8 @@ void drawTextColor(const char* msg, int x, int y, int scale, uint8_t color) {
 void fillRectColor(int x, int y, int w, int h, uint8_t color) {
   if (!colorBuf) return;
 
-  // Rectangles that miss this band entirely (the header bar, the footer
-  // rule, most histogram bars) would otherwise have every one of their
-  // pixels walked just to be clipped away inside the loop.
+  // 完全不落在当前分带内的矩形（顶栏、底部分隔线、大多数直方图柱）
+  // 若不提前返回，其每个像素都会被遍历一遍，然后才在循环内被裁掉。
   if (w <= 0 || !rowsHitBand(y, h)) return;
 
   for (int py = y; py < y + h; py++) {
@@ -265,7 +261,7 @@ void fillRectColor(int x, int y, int w, int h, uint8_t color) {
       if (px < 0 || px >= W) continue;
 
       int rpx = W - 1 - px;
-      int r   = (H - 1 - py) - s_bandRBase;   // row within the band
+      int r   = (H - 1 - py) - s_bandRBase;   // 分带内的行号
       if (r < 0 || r >= s_bandRows) continue;
 
       int pos = r * (W / 4) + rpx / 4;

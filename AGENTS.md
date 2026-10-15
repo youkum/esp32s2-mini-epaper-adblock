@@ -11,17 +11,19 @@
 - 命令、路径、文件名、代码标识符、寄存器/魔数（如 `CADB`、`HASH_BYTES`）；
 - 许可证名称（`MIT`、`GPL-3.0`）与上游项目名。
 
-英文版文档保留为 `README.en.md` / `GUIDE.en.md` 供非中文读者切换，但**默认展示与
-新增内容一律中文**。GitHub 仓库页展示 `README.md`（中文），不要把它换回英文。
+源码注释一律使用简体中文，仅术语（信号名、协议、标识符、魔数、许可证名）保留英文。
+
+本仓库不保留英文版文档（`README.en.md` / `GUIDE.en.md` 已移除），默认展示与
+新增内容一律简体中文。GitHub 仓库页展示 `README.md`（中文），不要把它换回英文。
 
 ### Issue tracker
 
-本仓库的票与规格都活在 GitHub Issues（`youkum/esp32s2-mini-epaper-adblock`）。See `docs/agents/issue-tracker.md`.
+本仓库的票与规格都活在 GitHub Issues（`youkum/esp32s2-mini-epaper-adblock`）。见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
 
-triage 五角色沿用技能默认标签名：`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`。See `docs/agents/triage-labels.md`.
+triage 五角色沿用技能默认标签名：`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`。见 `docs/agents/triage-labels.md`。
 
 ### Domain docs
 
-Domain docs 布局为 multi-context（子项目各一份 `CONTEXT.md`，根目录一份 `CONTEXT-MAP.md`）。See `docs/agents/domain.md`.
+Domain docs 布局为 multi-context（子项目各一份 `CONTEXT.md`，根目录一份 `CONTEXT-MAP.md`）。见 `docs/agents/domain.md`。
