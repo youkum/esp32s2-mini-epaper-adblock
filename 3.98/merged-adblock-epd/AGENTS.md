@@ -24,7 +24,7 @@ wiring and build steps.
 
 ## Two upstreams, and what was taken from each
 
-* DNS engine — [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/ESP32-C3-AdBlocker)
+* DNS engine — [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/9M2PJU-ESP32-C3-AdBlocker)
   (MIT). Blocklist format, hashing, async upstream forwarding, web
   dashboard.
 * E-paper renderer — InkSight ("墨鱼"). Driver, font, drawing

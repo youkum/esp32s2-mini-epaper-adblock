@@ -195,7 +195,7 @@ async function ban(ip){ await fetch("/ban?token="+TK+"&ip="+encodeURIComponent(i
 async function addB(){ var d=$("d2").value.trim(); if(!d) return; await fetch("/addblock?token="+TK+"&d="+encodeURIComponent(d)); $("d2").value=""; toast("已添加 "+d); load() }
 async function unb(d){ await fetch("/unblock?token="+TK+"&d="+encodeURIComponent(d)); toast("已移除"); load() }
 async function saveUp(){ await fetch("/setupdate?token="+TK+"&url="+encodeURIComponent($("upurl").value.trim())+"&iv="+$("upiv").value); toast("已保存"); load() }
-async function refreshScreen(){ await fetch("/refresh-screen?token="+TK); toast("正在刷新屏幕"); }
+async function refreshScreen(){ var r=await fetch("/refresh-screen?token="+TK); toast(r.ok?"已请求刷新屏幕":"未能请求刷新屏幕"); }
 async function setPass(){
   var a=$("np1").value,b=$("np2").value;
   if(a.length<6||a.length>64){ toast("密码长度需为 6-64 位"); return }

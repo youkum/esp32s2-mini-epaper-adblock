@@ -40,6 +40,7 @@
 static const IPAddress UPSTREAM(9, 9, 9, 9);
 static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
+static const char* BLOCKLIST_TMP = "/blocklist.tmp";
 static const int HASH_BYTES = 5;
 static const uint64_t HASH_MASK = (1ULL << (HASH_BYTES * 8)) - 1;
 static const int DNS_BUF_SIZE = 1232;
@@ -49,7 +50,7 @@ static const int MAX_CUSTOM = 200;
 static const int MAX_BAN = 32;
 static const uint32_t UPSTREAM_TIMEOUT_MS = 2000;
 static const uint32_t REMOTE_FETCH_IDLE_MS = 3000;
-static const char* DASHBOARD_ETAG = "adblk-console-v3";
+static const char* DASHBOARD_ETAG = "adblk-console-v4";
 
 // ---- 日志 ----
 #ifdef NDEBUG
@@ -131,8 +132,8 @@ static bool inFlash(uint64_t h) {
   uint8_t b[HASH_BYTES];
   while (lo <= hi) {
     int32_t mid = (lo + hi) >> 1;
-    blocklist.seek(hashTableOffset + (uint32_t)mid * HASH_BYTES);
-    blocklist.read(b, HASH_BYTES);
+    if (!blocklist.seek(hashTableOffset + (uint32_t)mid * HASH_BYTES) ||
+        blocklist.read(b, HASH_BYTES) != HASH_BYTES) return false;
     uint64_t v = 0;
     for (int k = 0; k < HASH_BYTES; k++) v |= (uint64_t)b[k] << (8 * k);
     if (v < h) lo = mid + 1;
@@ -653,6 +654,7 @@ static String jesc(const String& s) {
 // 保护，但没有网络的设备无法通过已知地址访问到，因此配网页面
 // 必须保持开放。
 static bool portalMode = false;
+static bool pendingPortalMessage = false;
 
 static void servePortal() {
   web.send(200, "text/html; charset=utf-8", R"PORTAL(<!doctype html><html lang=zh-CN><head>
@@ -734,12 +736,12 @@ static void handleStats() {
 }
 
 // 强制面板重绘，让屏幕能够按需刷新，而不必干等刷新间隔结束。
+static bool pendingRefresh = false;
 static void handleRefreshScreen() {
   if (!checkAuth()) { requireAuth(); return; }
   if (!checkToken()) { web.send(403, "text/plain", "bad token"); return; }
-  web.send(200, "text/plain", "refreshing");
-  delay(100);
-  dashboardDraw();
+  pendingRefresh = true;
+  web.send(202, "text/plain; charset=utf-8", "已加入刷新队列");
 }
 
 static void handleBan() {
@@ -848,35 +850,42 @@ static void handleSetPass() {
   web.send(200, "text/plain", "ok");
 }
 // ---- 黑名单（blocklist.bin）加载 ----
+static uint32_t readLe32(const uint8_t* p) {
+  return uint32_t(p[0]) | (uint32_t(p[1]) << 8) |
+         (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
+
+static bool readBlocklistHeader(File& f, uint32_t& count, uint32_t& bits, uint8_t& k) {
+  uint8_t hdr[BL_HEADER_SIZE];
+  if (!f || f.read(hdr, sizeof(hdr)) != sizeof(hdr) ||
+      memcmp(hdr, BL_MAGIC, sizeof(BL_MAGIC)) != 0 ||
+      hdr[4] != BL_VERSION || hdr[5] != HASH_BYTES) return false;
+  count = readLe32(hdr + 6);
+  bits = readLe32(hdr + 10);
+  k = hdr[14];
+  const uint64_t bloomBytes = (uint64_t(bits) + 7) / 8;
+  const uint64_t expected = BL_HEADER_SIZE + bloomBytes + uint64_t(count) * HASH_BYTES;
+  return count > 0 && (bits == 0 || (k > 0 && k <= 32)) && expected == f.size();
+}
+
 static bool loadBlocklist() {
   if (blocklist) blocklist.close();
-  if (!LittleFS.exists(BLOCKLIST_PATH)) {
-    LOGN("[BL] no blocklist file in the filesystem");
-    numHashes = 0; return false;
-  }
+  free(bloomFilter);
+  bloomFilter = nullptr;
+  numHashes = hashTableOffset = bloomBits = 0;
+  bloomK = 0;
   blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
-  if (!blocklist) { LOGN("[BL] open failed"); numHashes = 0; return false; }
-  LOG("[BL] file is %u bytes\n", (unsigned)blocklist.size());
-
-  uint8_t hdr[BL_HEADER_SIZE];
-  if (blocklist.read(hdr, BL_HEADER_SIZE) != BL_HEADER_SIZE) {
-    LOGN("[BL] header read short");
-    blocklist.close(); numHashes = 0; return false;
-  }
-  if (memcmp(hdr, BL_MAGIC, 4) != 0 || hdr[4] != BL_VERSION || hdr[5] != HASH_BYTES) {
-    LOGN("[BL] bad header"); blocklist.close(); numHashes = 0; return false;
-  }
-  numHashes = hdr[6] | (hdr[7] << 8) | ((uint32_t)hdr[8] << 16) | ((uint32_t)hdr[9] << 24);
-  bloomBits = hdr[10] | (hdr[11] << 8) | ((uint32_t)hdr[12] << 16) | ((uint32_t)hdr[13] << 24);
-  bloomK = hdr[14];
-
-  uint32_t bloomBytes = (bloomBits + 7) / 8;
-  if (bloomBits > 0 && (bloomK == 0 || bloomBytes > (4u << 20))) {
-    LOGN("[BL] bad bloom header");
-    blocklist.close(); numHashes = 0; bloomBits = 0; bloomK = 0;
+  uint32_t count, bits;
+  uint8_t k;
+  if (!readBlocklistHeader(blocklist, count, bits, k)) {
+    LOGN("[BL] 黑名单缺失、头部无效或文件长度不符");
+    if (blocklist) blocklist.close();
     return false;
   }
-  if (bloomFilter) { free(bloomFilter); bloomFilter = nullptr; }
+  numHashes = count;
+  bloomBits = bits;
+  bloomK = k;
+  const uint32_t bloomBytes = (uint64_t(bloomBits) + 7) / 8;
   if (bloomBits > 0) {
     // 128 KB 的随机寻址表：放 PSRAM 才是正解。DRAM 总共只有
     // 176 KB，而 WiFi 就要占去大半。
@@ -902,67 +911,57 @@ static bool loadBlocklist() {
   return numHashes > 0;
 }
 
+// 先校验临时文件；LittleFS rename 会替换目标，无需先删除旧列表。
+static bool installStagedBlocklist() {
+  File candidate = LittleFS.open(BLOCKLIST_TMP, "r");
+  uint32_t count, bits;
+  uint8_t k;
+  const bool valid = readBlocklistHeader(candidate, count, bits, k);
+  if (candidate) candidate.close();
+  if (!valid) {
+    LittleFS.remove(BLOCKLIST_TMP);
+    return false;
+  }
+  if (blocklist) blocklist.close();
+  if (!LittleFS.rename(BLOCKLIST_TMP, BLOCKLIST_PATH)) {
+    LittleFS.remove(BLOCKLIST_TMP);
+    loadBlocklist();
+    return false;
+  }
+  return loadBlocklist();
+}
+
 // ---- 远程黑名单拉取 ----
 static bool fetchBlocklist(String url) {
   if (url.length() == 0) return false;
-  web.send(200, "text/plain", "fetching...");
-  delay(50);
-
-  bool https = url.startsWith("https://");
+  const bool https = url.startsWith("https://");
+  if (!https && !url.startsWith("http://")) { DASH_SETSTATUS("URL 无效"); return false; }
   HTTPClient http;
   WiFiClient plain;
   WiFiClientSecure secure;
-  secure.setCACert(nullptr);  // 依赖固件内置的证书包
-
   bool begun = https ? http.begin(secure, url) : http.begin(plain, url);
-  if (!begun) { DASH_SETSTATUS("bad url"); return false; }
+  if (!begun) { DASH_SETSTATUS("URL 无效"); return false; }
   http.setTimeout(HTTP_TIMEOUT_MS);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   int code = http.GET();
   if (code != 200) {
     http.end();
-    DASH_SETSTATUS("http " + String(code));
+    DASH_SETSTATUS("HTTP " + String(code));
     return false;
   }
-
-  File tmp = LittleFS.open("/blocklist.tmp", "w");
-  if (!tmp) { http.end(); DASH_SETSTATUS("fs full"); return false; }
-
-  uint8_t hdr[4];
-  http.getStream().readBytes(hdr, 4);
-  if (memcmp(hdr, BL_MAGIC, 4) != 0) {
-    tmp.close(); LittleFS.remove("/blocklist.tmp");
-    http.end(); DASH_SETSTATUS("bad magic");
-    return false;
-  }
-  tmp.write(hdr, 4);
-  uint8_t buf[1024];
-  WiFiClient* stream = http.getStreamPtr();
-  int remaining = http.getSize();
-  int written = 4;
-  uint32_t lastData = millis();
-  while (http.connected() && (remaining < 0 || written < remaining)) {
-    size_t avail = stream->available();
-    if (avail) {
-      int n = stream->read(buf, sizeof(buf));
-      if (n > 0) { tmp.write(buf, n); written += n; remaining -= n; lastData = millis(); }
-    } else {
-      if (millis() - lastData > REMOTE_FETCH_IDLE_MS) break;
-      delay(10);
-    }
-  }
+  File tmp = LittleFS.open(BLOCKLIST_TMP, "w");
+  if (!tmp) { http.end(); DASH_SETSTATUS("无法写入临时文件"); return false; }
+  const int expected = http.getSize();
+  const int written = http.writeToStream(&tmp);
   tmp.close();
   http.end();
-
-  if (written < BL_HEADER_SIZE) {
-    LittleFS.remove("/blocklist.tmp");
-    DASH_SETSTATUS("short file");
+  if (written < BL_HEADER_SIZE || (expected >= 0 && written != expected)) {
+    LittleFS.remove(BLOCKLIST_TMP);
+    DASH_SETSTATUS("下载不完整或写入失败");
     return false;
   }
-  LittleFS.remove(BLOCKLIST_PATH);
-  LittleFS.rename("/blocklist.tmp", BLOCKLIST_PATH);
-  if (!loadBlocklist()) { DASH_SETSTATUS("load failed"); return false; }
-  DASH_SETSTATUS("never");
+  if (!installStagedBlocklist()) { DASH_SETSTATUS("黑名单校验或替换失败"); return false; }
+  DASH_SETSTATUS("更新成功");
   return true;
 }
 // ---- 配网门户（AP 模式）----
@@ -970,7 +969,7 @@ static void startConfigPortal() {
   portalMode = true;
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID_DEFAULT);
-  dashboardMessage("配网模式", AP_SSID_DEFAULT, "浏览器打开 192.168.4.1");
+  pendingPortalMessage = true;
   LOG("[SETUP] AP %s open at http://%s/\n",
       AP_SSID_DEFAULT, WiFi.softAPIP().toString().c_str());
 }
@@ -980,6 +979,7 @@ static void startConfigPortal() {
 // 用户真正想要的是 DNS 引擎在工作。此时凭据已经写入 /wifi.cfg。
 static void stopConfigPortal() {
   portalMode = false;
+  pendingPortalMessage = false;
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);
   LOG("[SETUP] portal closed, rejoining as a station\n");
@@ -1003,21 +1003,34 @@ static void handleUpdateDone() {
   delay(500);
   ESP.restart();
 }
+static File blocklistUpload;
+static bool blocklistUploadOk = false;
 static void handleBlocklistUpload() {
-  if (!checkAuth()) { requireAuth(); return; }
+  if (!checkAuth()) return;
   HTTPUpload& up = web.upload();
   if (up.status == UPLOAD_FILE_START) {
-    LittleFS.remove(BLOCKLIST_PATH);
-  } else if (up.status == UPLOAD_FILE_WRITE) {
-    File f = LittleFS.open(BLOCKLIST_PATH, "a");
-    if (f) { f.write(up.buf, up.currentSize); f.close(); }
-  } else if (up.status == UPLOAD_FILE_END) {
-    loadBlocklist();
+    if (blocklistUpload) blocklistUpload.close();
+    blocklistUploadOk = false;
+    blocklistUpload = LittleFS.open(BLOCKLIST_TMP, "w");
+  } else if (up.status == UPLOAD_FILE_WRITE && blocklistUpload) {
+    if (blocklistUpload.write(up.buf, up.currentSize) != up.currentSize) {
+      blocklistUpload.close();
+      LittleFS.remove(BLOCKLIST_TMP);
+    }
+  } else if (up.status == UPLOAD_FILE_END && blocklistUpload) {
+    blocklistUpload.close();
+    blocklistUploadOk = installStagedBlocklist();
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    if (blocklistUpload) blocklistUpload.close();
+    LittleFS.remove(BLOCKLIST_TMP);
+    blocklistUploadOk = false;
   }
 }
 static void handleBlocklistDone() {
   if (!checkAuth()) { requireAuth(); return; }
-  web.send(200, "text/plain", "ok");
+  web.send(blocklistUploadOk ? 200 : 400, "text/plain; charset=utf-8",
+           blocklistUploadOk ? "黑名单已更新" : "黑名单上传或校验失败");
+  blocklistUploadOk = false;
 }
 
 // ---- WiFi ----
@@ -1200,7 +1213,7 @@ void setup() {
     ArduinoOTA.setHostname(DNS_HOSTNAME);
     ArduinoOTA.begin();
 
-    dashboardDraw();
+    pendingRefresh = true;
   }
   lastDashMs = millis();
   lastPeriodicPullMs = millis();
@@ -1239,41 +1252,53 @@ void loop() {
     lastDay = tmNow.tm_mday;
   }
 
-  // 面板：按间隔整幅重绘；按住配置按键时立即重绘
-  // （手动「给我看数据」的手势）。
-  if (now - lastDashMs >= DASH_REFRESH_MS) {
-    dashboardDraw();
-    lastDashMs = now;
+  // BOOT 键使用非阻塞去抖；按住或松开时仍服务 DNS/HTTP。
+  static bool rawPressed = false;
+  static bool pressed = false;
+  static bool holdHandled = false;
+  static uint32_t rawSince = 0;
+  static uint32_t pressedSince = 0;
+  bool refreshRequested = false;
+  const bool sample = digitalRead(PIN_CFG_BTN) == LOW;
+  if (sample != rawPressed) {
+    rawPressed = sample;
+    rawSince = now;
   }
-  if (digitalRead(PIN_CFG_BTN) == LOW) {
-    delay(SHORT_PRESS_MIN_MS);
-    if (digitalRead(PIN_CFG_BTN) == LOW) {
-      // 按住时长决定动作。短按：重绘仪表盘，即手动「给我看数据」。
-      // 长按：再次打开配网门户——一旦开发板离开当初配网所用网络的
-      // 覆盖范围，这是回到 WiFi 表单的唯一入口。
-      uint32_t heldMs = 0;
-      bool longPress = false;
-      while (digitalRead(PIN_CFG_BTN) == LOW) {
-        delay(BTN_POLL_MS);
-        heldMs += BTN_POLL_MS;
-        if (!longPress && heldMs >= CFG_BTN_HOLD_MS) {
-          longPress = true;
-          break;
-        }
-      }
-      if (longPress) {
-        LOGN("[BTN] hold detected - opening the setup portal");
+  if (rawPressed != pressed && now - rawSince >= BTN_POLL_MS) {
+    pressed = rawPressed;
+    if (pressed) {
+      holdHandled = false;
+      pressedSince = rawSince;
+    } else if (!holdHandled) {
+      const uint32_t heldMs = rawSince - pressedSince;
+      if (heldMs >= CFG_BTN_HOLD_MS) {
+        holdHandled = true;
         startConfigPortal();
       } else {
-        dashboardDraw();
-        lastDashMs = now;
-        while (digitalRead(PIN_CFG_BTN) == LOW) delay(10);
+        refreshRequested = heldMs >= SHORT_PRESS_MIN_MS;
       }
     }
   }
+  if (pressed && rawPressed && !holdHandled && now - pressedSince >= CFG_BTN_HOLD_MS) {
+    holdHandled = true;
+    LOGN("[BTN] 检测到长按，打开配网门户");
+    startConfigPortal();
+  }
+  pendingRefresh = pendingRefresh || refreshRequested;
+  if (portalMode && pendingPortalMessage && !epdRefreshActive()) {
+    pendingPortalMessage = false;
+    dashboardMessage("配网模式", AP_SSID_DEFAULT, "浏览器打开 192.168.4.1");
+  }
+  if (!portalMode && !epdRefreshActive() &&
+      (pendingRefresh || now - lastDashMs >= DASH_REFRESH_MS)) {
+    pendingRefresh = false;
+    dashboardDraw();
+    lastDashMs = now;
+  }
 
   // 定期拉取黑名单，只在 DNS 已经安静下来之后执行。
-  if (updateIntervalH > 0 && updateUrl.length() &&
+  if (!portalMode && WiFi.status() == WL_CONNECTED &&
+      updateIntervalH > 0 && updateUrl.length() &&
       now - lastPeriodicPullMs >= updateIntervalH * 3600000UL &&
       now - lastDnsActivityMs > REMOTE_FETCH_IDLE_MS) {
     fetchBlocklist(updateUrl);

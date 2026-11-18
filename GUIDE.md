@@ -325,6 +325,8 @@ secondary DNS -> 任意一台「非」sinkhole 的 DNS
 
 ### 从源列表重建
 
+对外分发列表或含列表的固件前，先核对 [第三方声明](THIRD-PARTY-NOTICES.md)。
+
 ```bash
 cd 3.98/merged-adblock-epd
 python tools/build_blocklist.py data/blocklist.bin           # StevenBlack + Hagezi Light
@@ -347,6 +349,12 @@ python tools/build_blocklist.py data/blocklist.bin a.txt b.txt   # 你自己的�
   控制台的 规则更新 卡片上传 `.bin`。
 * **远程自动更新：** 把你的 `.bin` 托管到某处并在控制台填 URL；设备会按你选的
   间隔重新下载。
+
+上传和定时下载都会先写临时文件、检查 `CADB` 头和文件长度，再替换旧列表。
+传输中断、文件结构不符或 LittleFS 空间不足时，应保留原列表；更新期间 LittleFS
+需要同时容纳旧列表和新文件。结构检查不证明列表来源可信或哈希内容正确。
+定时下载仍为同步操作，网络慢时可能暂时影响 DNS。HTTPS 服务器需要设备信任其 CA；
+当前固件没有为列表下载配置 CA 时应使用 Web 控制台手动上传，不要跳过证书校验。
 
 ### 自定义单个域名
 
@@ -430,6 +438,10 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 拉开到 10 ms 几乎可全部收回。这是**已记录、已接受的上限**，不是 bug：完整推理
 与「为何 `parsePacket()` 排空循环无济于事」见
 [`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md) 的 "burst ceiling" 条目。
+
+**主循环。** BOOT 键去抖与长按检测不等待按键释放；短按遇到面板忙时排队，
+长按进入配网门户仍会断开当前 STA。仪表盘的 Top 10 每帧选取一次，不再为全部
+9 个分带重复选取。本节原有硬件跑分为改动前的参考，未重新采集。
 
 **面板刷新。** 一帧包含两种截然不同的耗时：传输比特约 1.4 s，之后**约 15 s**
 供面板移动色素。固件把两者拆开，让那 ~15 s 在后台运行；这就是为什么 `[EPD]`

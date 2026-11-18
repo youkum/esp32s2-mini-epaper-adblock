@@ -68,6 +68,7 @@ static const int LIST_TITLE_Y  = 294;
 static const int LIST_Y0       = 334;
 static const int LIST_PITCH    = 30;
 static const int LIST_ROWS     = 5;                     // 每列行数（共 10 行）
+static TopEntry s_top[LIST_ROWS * 2];             // 每帧只排序一次
 static const int FOOTER_RULE_Y = 500;
 static const int FOOTER_Y      = 512;
 
@@ -186,16 +187,13 @@ static void drawHourly() {
 static void drawTopList() {
   sectionTitle(COL_L_X, LIST_TITLE_Y, "域名排行榜");
 
-  TopEntry t[LIST_ROWS * 2];
-  trackerGetTop(t, LIST_ROWS * 2);
-
-  if (!t[0].domain[0] || t[0].count == 0) {
+  if (!s_top[0].domain[0] || s_top[0].count == 0) {
     drawTextColor("暂无拦截记录", COL_L_X, LIST_Y0, 2, COLOR_BLACK);
     return;
   }
 
   for (int i = 0; i < LIST_ROWS * 2; i++) {
-    if (!t[i].domain[0] || t[i].count == 0) continue;
+    if (!s_top[i].domain[0] || s_top[i].count == 0) continue;
 
     const int col = i / LIST_ROWS;          // 0 = 左列, 1 = 右列
     const int row = i % LIST_ROWS;
@@ -208,12 +206,12 @@ static void drawTopList() {
     drawTextColor(rank, x0, y, 2, COLOR_BLACK);
 
     char cnt[16];
-    fmtGrouped(t[i].count, cnt, sizeof(cnt));
+    fmtGrouped(s_top[i].count, cnt, sizeof(cnt));
     textRight(cnt, x0 + w, y, 2, COLOR_BLACK);
 
     // 域名占用排名槽位与计数之间剩余的全部宽度。
     char name[64];
-    strncpy(name, t[i].domain, sizeof(name) - 1);
+    strncpy(name, s_top[i].domain, sizeof(name) - 1);
     name[sizeof(name) - 1] = 0;
     const int nameX = x0 + 30;
     int maxChars = (x0 + w - textWidth(strlen(cnt), 2) - 12 - nameX) / 12;
@@ -279,6 +277,7 @@ static void copyLine(char* dst, const char* src) {
 }
 
 void dashboardDraw() {
+  trackerGetTop(s_top, LIST_ROWS * 2);
   s_screen = SCREEN_DASHBOARD;
   flushScreen();
 }

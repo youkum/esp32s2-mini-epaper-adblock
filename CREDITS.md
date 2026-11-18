@@ -1,8 +1,8 @@
 # 开源署名（Credits）
 
 本项目是**衍生作品**。没有下面这些项目它就不会存在；每一项都在此署名，
-而不是埋在源码注释里。所有上游组件均以 **MIT** 许可；其许可证全文在
-本文件末尾逐字转载。
+而不是埋在源码注释里。以下两个代码上游以 **MIT** 许可，对应声明见文末。
+列表、字体、平台组件和固件发布的单独要求见 [第三方声明](THIRD-PARTY-NOTICES.md)。
 
 若你是上游作者、希望修改这里的措辞，请开一个 issue——署名更正随时欢迎。
 
@@ -10,7 +10,8 @@
 
 ## 1. DNS 引擎 — 9M2PJU / ESP32-C3-AdBlocker
 
-* **仓库**： <https://github.com/9M2PJU/ESP32-C3-AdBlocker>
+* **仓库**： <https://github.com/9M2PJU/9M2PJU-ESP32-C3-AdBlocker>
+* **原始上游**：[M-Abozaid/esp32-c3-adblock](https://github.com/M-Abozaid/esp32-c3-adblock)，同为 MIT，版权声明为 `Copyright (c) 2026 zed`。
 * **许可证**： MIT — Copyright (c) 2026 zed
 * **本项目采用了**：
   * 整个拦截用 DNS 服务器（端口 53，UDP + TCP 双栈）。
@@ -40,21 +41,21 @@ blocklist 的**文件格式刻意与上游项目保持完全一致**，为任一
 
 **刻意*没有*采用的部分**：InkSight 的云后端、Next.js 网站、手机 App、
 24 个内置「模式」、LLM 内容管线与在线烧写流程。本固件是自成一体的
-sinkhole，从不与 `inksight.site` 或任何远程服务通信。长期规则见
+sinkhole，不使用 InkSight 的服务；仍会访问上游 DNS、NTP 和用户配置的列表地址。长期规则见
 `AGENTS.md`。
 
 ## 3. blocklist 数据来源
 
 默认的 `blocklist.bin` 由以下社区列表构建。它们是**数据**而非代码，各自
-携带自己的许可（两者均较宽松；再分发派生列表前请查看相应仓库的最新条款）：
+携带自己的许可（不适用本仓库的统一 MIT 声明；分发前应分别核对条款）：
 
 * **StevenBlack/hosts** — <https://github.com/StevenBlack/hosts>
   （默认 `hosts` 列表，MIT）。
 * **hagezi/dns-blocklists** — <https://github.com/hagezi/dns-blocklists>
   （`light-onlydomains.txt`，列表数据为 GPL-3.0）。
 
-随固件附带的 `data/blocklist.bin` 是两者并集编译成的哈希表
-（约 103,000 个域名），不是任一文件的拷贝。
+`tools/build_blocklist.py` 的默认输入为这两份列表。现有 `data/blocklist.bin`
+未记录输入快照及校验和，不能用默认输入的当前版本证明历史二进制的来源。
 
 ## 4. 平台与工具链（由 PlatformIO 拉取，未随仓库分发）
 
@@ -66,7 +67,7 @@ sinkhole，从不与 `inksight.site` 或任何远程服务通信。长期规则�
   （`CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6` — burst ceiling 说明见 `AGENTS.md`）。
 * **esptool** — <https://github.com/espressif/esptool>（GPL-2.0）
 * **SimHei**（`simhei.ttf`）— `tools/gen_cjk_font.py` **离线**栅格化字形所用的
-  Windows 系统字体。仓库只提交生成的 16×16 点阵，不随仓库再分发字体文件。
+  Windows 系统字体。仓库只提交生成的 16×16 点阵，不随仓库再分发字体文件。未证实提取字形可再分发。
 * **Node.js** — `tools/*.js` 辅助脚本使用（MIT）。
 
 ---

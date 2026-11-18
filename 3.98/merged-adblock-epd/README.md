@@ -2,7 +2,7 @@
 
 ESP32-S2 mini 上的 **DNS sinkhole + 四色电子纸仪表盘**固件。由两个 MIT 许可的
 上游项目合并而成：DNS 引擎来自
-[9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/ESP32-C3-AdBlocker)，
+[9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/9M2PJU-ESP32-C3-AdBlocker)，
 电子纸驱动与绘图原语来自 [datascale-ai/inksight](https://github.com/datascale-ai/inksight)。
 
 > 本目录是固件源码。项目总览见仓库根的 [README.md](../../README.md)；

@@ -4,8 +4,7 @@
 
 把一块 **ESP32-S2 mini** 变成自成一体的 **DNS 广告拦截器**，统计信息绘制在
 **7.5 英寸四色电子纸「魔法屏」**（768×552，JDY79668 / GDEY075Z08 class）上。
-没有云、没有手机 App、没有账号：一块主板、一块屏、一根电源线，让整个网络
-不再显示广告。
+没有云、没有手机 App、没有账号：一块主板、一块屏、一根电源线，为使用该 DNS 的客户端拦截已列入黑名单的域名。
 
 面板每 3 分钟刷新一次，显示设备自己拦截到的数据——今日拦截数、拦截率、
 每小时直方图与 Top 域名；与此同时 DNS 引擎在后台持续应答查询。其余功能
@@ -45,7 +44,7 @@
 * **blocklist 存于 flash**：排序后的 40-bit FNV-1a 哈希表，先用分配在
   PSRAM 中的 128 KB Bloom filter 预过滤。其格式（magic `CADB`、
   `HASH_BYTES = 5`）与上游
-  [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/ESP32-C3-AdBlocker)
+  [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/9M2PJU-ESP32-C3-AdBlocker)
   项目**字节兼容**。随固件附带的列表约 **103,000** 个域名。
 * **按客户端追踪**：IP、MAC、blocked/allowed 计数、ban/unban。
 * **自包含的 Web 控制台**（Basic Auth + CSRF，无 CDN、无外部资源）：
@@ -118,7 +117,7 @@ esptool.py --chip esp32s2 write_flash 0x0 3.98/merged-adblock-epd/firmware-merge
 本项目是**衍生作品**。两个 MIT 许可的项目承担了大部分底层工作，在此、
 在 [CREDITS.md](CREDITS.md) 中以及源码头部均有署名：
 
-* **DNS 引擎** — [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/ESP32-C3-AdBlocker)
+* **DNS 引擎** — [9M2PJU/ESP32-C3-AdBlocker](https://github.com/9M2PJU/9M2PJU-ESP32-C3-AdBlocker)
   （MIT，© 2026 zed）：拦截用 DNS 服务器、40-bit FNV-1a 哈希 blocklist
   格式、Bloom 预过滤与异步上游转发。
 * **电子纸渲染器** — [datascale-ai/inksight](https://github.com/datascale-ai/inksight)
@@ -175,3 +174,5 @@ esptool.py --chip esp32s2 write_flash 0x0 3.98/merged-adblock-epd/firmware-merge
 
 MIT — 见 [LICENSE](LICENSE)。上游组件同样是 MIT；其声明转载于
 [CREDITS.md](CREDITS.md)。
+
+发布前请核对 [第三方声明](THIRD-PARTY-NOTICES.md)；仓库的 MIT 许可不自动覆盖黑名单数据、中文字形和平台库。
