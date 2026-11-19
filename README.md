@@ -108,10 +108,17 @@ Web OTA 不能上传 `firmware-merged.bin`。合成镜像路径见 [指南](GUID
 
 ## 下载 / 发行版
 
-历史预编译的**合成固件镜像**（`firmware-merged.bin`，从偏移 `0x0` 烧写）附在
+当前发行版为 [v1.2.0](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases/tag/v1.2.0)。
+预编译的**合成固件镜像**（`firmware-merged.bin`，从偏移 `0x0` 烧写）附在
 [**Releases**](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases)
 页面。合成镜像打包了 bootloader + partition table + 应用程序 + LittleFS
 （含 blocklist），所以一个文件就能得到一台真正能拦截的设备。
+
+- **首次部署 / 重新初始化**：下载 `firmware-merged.bin`，从 `0x0` 烧写，会覆盖已有配置。
+- **已有设备 Web OTA**：下载 `firmware.bin`，在控制台上传应用程序。
+- **仅更新列表**：下载 `blocklist.bin`，在规则更新卡片上传。
+- **手动分区烧写 / 调试**：使用 `esp32s2-flash-v1.2.0.zip` 或 `esp32s2-debug-v1.2.0.zip`。
+- **校验和与许可资料**：下载 `SHA256SUMS.txt`、`release-metadata.json` 和 `release-docs-v1.2.0.zip`。
 
 历史 Release 不随 `master` 的源码提交自动更新。自行构建的验收记录见
 [构建验证记录](docs/BUILD-VERIFICATION.md)；对外发布新镜像前核对

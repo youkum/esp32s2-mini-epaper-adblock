@@ -65,7 +65,7 @@ sinkhole，不使用 InkSight 的服务；仍会访问上游 DNS、NTP 和用户
 * **PlatformIO Core** — <https://github.com/platformio/platformio-core>（Apache-2.0）；
   **platform-espressif32 6.12.0** — <https://github.com/platformio/platform-espressif32/tree/v6.12.0>（Apache-2.0）。
 * **Arduino-ESP32 core**（Espressif）— <https://github.com/espressif/arduino-esp32>
-  （本次 2.0.17，LGPL-2.1 系列条款；部分目录另有许可，按文件原文处理）。
+  （本次 2.0.17，包声明为 LGPL-2.1-or-later；部分目录另有许可，按文件原文处理）。
 * **ESP-IDF**（Espressif）— <https://github.com/espressif/esp-idf>
   （本次随 Arduino 包提供的 SDK 为 4.4.7，主体 Apache-2.0）。**lwIP**
   使用 BSD-3-Clause，其他 SDK 组件按各自文件许可；不能全部归为 Apache-2.0。

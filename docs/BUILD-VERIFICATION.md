@@ -1,8 +1,10 @@
 # 构建验证记录
 
 验证日期：2026-11-19（北京时间）。目标：`s2mini`，ESP32-S2 mini / 4 MB flash / 2 MB PSRAM。
-固件源码基线为 `b2daa32eb3cbe3d1dce43744266e34c20b7d8976`；本记录所在提交将平台固定为
-`espressif32@6.12.0`，修正合成与烧写辅助工具，并更新指导文档，未修改该基线的 `src/`。
+固件源码基线为 `b2daa32eb3cbe3d1dce43744266e34c20b7d8976`；
+`ea1cace3319cc88014f7df265f0e10d3e22da500` 将平台固定为 `espressif32@6.12.0`，
+修正合成与烧写辅助工具，并更新指导文档。v1.2.0 发布补充发行说明和下载入口，
+未修改该基线的 `src/`，使用下表已验证的同一批二进制。
 
 ## 实际工具版本
 
@@ -60,7 +62,9 @@ git diff --check
 |`firmware-merged.bin`|4,128,768|`5bd1ca66a3fa33aa294951b8112884164a4bb3d507ff6bb7408912b5473b958e`|
 |`data/blocklist.bin`（旧列表，未重建）|647,922|`1591fe4d1c0f08f62c2de52fed50c640364eae6e670faaf0a40fc20b6e6774d0`|
 
-路径相对于 `3.98/merged-adblock-epd/`。构建产物留在本地并由 `.gitignore` 排除，未创建新 Release。
+路径相对于 `3.98/merged-adblock-epd/`。构建产物由 `.gitignore` 排除，作为
+[v1.2.0 Release 附件](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases/tag/v1.2.0)提供；
+应用程序、合成镜像、文件系统、列表、分区烧写包、调试包、校验和及文档包均在附件中。
 历史 GitHub Release 不随源码推送自动更新。SHA-256 仅用于识别本次产物，不作为跨机器重建的硬性预期。
 
 ## 尚未验收的范围
@@ -69,5 +73,5 @@ git diff --check
 掉线重连、Web OTA，以及黑名单中断 / 截断 / 空间不足时的旧列表保留，均需真机回归。
 需重新测量刷新期间和自动下载期间的 DNS 延迟、丢包与面板帧耗时；指南中的旧数据只是参考。
 
-本地合成验证不解决旧黑名单的输入快照和 SimHei 点阵许可。源码、数据、字体和平台组件
+此次发布保留原列表和字形；发布动作不构成旧黑名单输入快照或 SimHei 点阵许可的证明。源码、数据、字体和平台组件
 的许可范围及发行待办见[第三方声明](../THIRD-PARTY-NOTICES.md)，部署命令见[指南](../GUIDE.md)。
