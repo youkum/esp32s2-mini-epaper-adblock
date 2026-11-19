@@ -1,15 +1,9 @@
-# Build, flash and capture the ESP32-S2 serial console.
-#
-# Two things this script exists for:
-#  1. pio's upload target fails intermittently with
-#     "OSError(22, 'device does not support the request')" while the board is
-#     re-enumerating on USB. Waiting for a stable port and retrying fixes it.
-#  2. The console is the chip's native USB CDC, and USBCDC only marks itself
-#     connected when DTR *and* RTS are both asserted. .NET's SerialPort leaves
-#     both false by default, which silently drops every byte the device sends.
+﻿# 构建、烧写 s2mini 应用程序，并捕获原生 USB CDC 串口日志。
+# 不烧写 LittleFS。首次部署另行执行 uploadfs；升级时保留已有文件系统。
+# 等待端口稳定并重试，以处理 USB 重新枚举；捕获时启用 DTR 和 RTS。
 param(
   [string]$Port = "COM3",
-  [string]$Root = "D:\works\3.98\merged-adblock-epd",
+  [string]$Root = (Split-Path -Parent $PSScriptRoot),
   [int]$CaptureSec = 70,
   [int]$MaxTries = 5,
   [switch]$SkipBuild
@@ -28,26 +22,30 @@ function Wait-StablePort {
   return $false
 }
 
-Set-Location $Root
+$Root = (Resolve-Path -LiteralPath $Root -ErrorAction Stop).Path
+if (-not (Test-Path -LiteralPath (Join-Path $Root "platformio.ini"))) {
+  throw "Root 必须指向包含 platformio.ini 的固件目录"
+}
+Set-Location -LiteralPath $Root
 
 if (-not $SkipBuild) {
-  "=== build ==="
-  python -m platformio run -d $Root *>> "$Root\build.log"
-  if ($LASTEXITCODE -ne 0) { "BUILD FAILED"; exit 1 }
+  "正在构建（日志：build.log）"
+  python -m platformio run -d $Root -e s2mini *>> "$Root\build.log"
+  if ($LASTEXITCODE -ne 0) { "构建失败，请检查 build.log"; exit 1 }
 }
 
-"=== upload ==="
+"正在上传应用程序（日志：upload.log）"
 $uploaded = $false
 for ($i = 1; $i -le $MaxTries; $i++) {
-  if (-not (Wait-StablePort -Name $Port)) { "port $Port never appeared (try $i)"; continue }
-  python -m platformio run -d $Root -t upload --upload-port $Port *>> "$Root\upload.log"
-  if ($LASTEXITCODE -eq 0) { "uploaded on try $i"; $uploaded = $true; break }
-  "upload try $i failed, retrying"
+  if (-not (Wait-StablePort -Name $Port)) { "端口 $Port 未出现（第 $i 次尝试）"; continue }
+  python -m platformio run -d $Root -e s2mini -t upload --upload-port $Port *>> "$Root\upload.log"
+  if ($LASTEXITCODE -eq 0) { "第 $i 次尝试上传成功"; $uploaded = $true; break }
+  "第 $i 次上传失败，准备重试"
   Start-Sleep -Seconds 6
 }
-if (-not $uploaded) { "UPLOAD FAILED"; exit 1 }
+if (-not $uploaded) { "上传失败，请检查 upload.log"; exit 1 }
 
-"=== capture for $CaptureSec s ==="
+"正在捕获串口日志，持续 $CaptureSec 秒"
 Start-Sleep -Milliseconds 800
 $sp = New-Object System.IO.Ports.SerialPort($Port, 115200, [System.IO.Ports.Parity]::None, 8, [System.IO.Ports.StopBits]::One)
 $sp.DtrEnable = $true
@@ -56,7 +54,7 @@ $sp.ReadTimeout = 200
 $sb = New-Object System.Text.StringBuilder
 $t0 = Get-Date
 $drops = 0
-try { $sp.Open() } catch { "open failed: $_" }
+try { $sp.Open() } catch { "打开串口失败：$_" }
 while (((Get-Date) - $t0).TotalSeconds -lt $CaptureSec) {
   try {
     $chunk = $sp.ReadExisting()
@@ -72,5 +70,5 @@ while (((Get-Date) - $t0).TotalSeconds -lt $CaptureSec) {
 try { $sp.Close() } catch {}
 $text = $sb.ToString()
 $text | Set-Content -Encoding utf8 "$Root\serial.log"
-"=== drops: $drops, chars: " + $text.Length + " ==="
+"串口异常次数：$drops，捕获字符数：" + $text.Length
 $text

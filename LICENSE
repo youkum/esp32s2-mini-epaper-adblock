@@ -22,9 +22,9 @@ SOFTWARE.
 
 ---
 
-This project is a derivative work that builds on the following MIT-licensed
-open-source projects. Their copyright notices are reproduced in full in
-`CREDITS.md`:
+本项目基于以下 MIT 许可项目的代码进行修改，原版权与许可全文见 CREDITS.md。
+生成的数据、字体点阵及平台库不自动适用此 MIT；具体范围见 THIRD-PARTY-NOTICES.md。
 
   * 9M2PJU/ESP32-C3-AdBlocker — Copyright (c) 2026 zed
+    原始上游：M-Abozaid/esp32-c3-adblock（相同版权声明）
   * datascale-ai/inksight (InkSight / 墨鱼) — Copyright (c) 2026 datascale-ai

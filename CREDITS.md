@@ -14,7 +14,7 @@
 * **原始上游**：[M-Abozaid/esp32-c3-adblock](https://github.com/M-Abozaid/esp32-c3-adblock)，同为 MIT，版权声明为 `Copyright (c) 2026 zed`。
 * **许可证**： MIT — Copyright (c) 2026 zed
 * **本项目采用了**：
-  * 整个拦截用 DNS 服务器（端口 53，UDP + TCP 双栈）。
+  * 拦截用 DNS 服务器的基础实现（端口 53，UDP + TCP 双栈），本仓库有后续修改。
   * 40-bit FNV-1a 哈希 blocklist 格式：flash 中的排序哈希、magic
     `CADB`、`HASH_BYTES = 5`、二分查找，以及 RAM 中的 Bloom 预过滤。
   * 异步上游转发设计（改写查询 ID、维护 pending 表、把应答匹配回客户端）。
@@ -23,8 +23,8 @@
   * Web 控制台的大部分交互模型（Basic Auth、CSRF token、ban/unban、
     自定义域名列表、远程 blocklist URL）。
 
-blocklist 的**文件格式刻意与上游项目保持完全一致**，为任一固件构建的
-`blocklist.bin` 都可以直接装入另一个。
+本项目保持上游 v1 `CADB` 格式（20 字节头部、5 字节哈希），但导入还受非空、
+精确文件长度和文件系统空间限制。格式兼容不等于数据来源或许可证相同。
 
 ## 2. 电子纸渲染器 — InkSight（墨鱼）
 
@@ -46,29 +46,36 @@ sinkhole，不使用 InkSight 的服务；仍会访问上游 DNS、NTP 和用户
 
 ## 3. blocklist 数据来源
 
-默认的 `blocklist.bin` 由以下社区列表构建。它们是**数据**而非代码，各自
-携带自己的许可（不适用本仓库的统一 MIT 声明；分发前应分别核对条款）：
+`tools/build_blocklist.py` **默认下载的输入**如下；这份配置不能证明仓库内旧
+`data/blocklist.bin` 的准确来源。列表是数据，按各自条款处理：
 
 * **StevenBlack/hosts** — <https://github.com/StevenBlack/hosts>
-  （默认 `hosts` 列表，MIT）。
+  （默认 `hosts` 聚合列表，仓库声明为 MIT；输入还列有其他维护者的来源和归属）。
 * **hagezi/dns-blocklists** — <https://github.com/hagezi/dns-blocklists>
   （`light-onlydomains.txt`，列表数据为 GPL-3.0）。
 
 `tools/build_blocklist.py` 的默认输入为这两份列表。现有 `data/blocklist.bin`
 未记录输入快照及校验和，不能用默认输入的当前版本证明历史二进制的来源。
 
-## 4. 平台与工具链（由 PlatformIO 拉取，未随仓库分发）
+## 4. 平台、构建工具与字体
 
-* **PlatformIO** — <https://platformio.org/>（Apache-2.0）
+工具本身未提交到源码仓库，平台运行库和字体点阵则会进入固件。
+本次实际版本见[构建验证记录](docs/BUILD-VERIFICATION.md)。
+
+* **PlatformIO Core** — <https://github.com/platformio/platformio-core>（Apache-2.0）；
+  **platform-espressif32 6.12.0** — <https://github.com/platformio/platform-espressif32/tree/v6.12.0>（Apache-2.0）。
 * **Arduino-ESP32 core**（Espressif）— <https://github.com/espressif/arduino-esp32>
-  （LGPL-2.1）
+  （本次 2.0.17，LGPL-2.1 系列条款；部分目录另有许可，按文件原文处理）。
 * **ESP-IDF**（Espressif）— <https://github.com/espressif/esp-idf>
-  （Apache-2.0），含预编译的 **lwIP** 协议栈
-  （`CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6` — burst ceiling 说明见 `AGENTS.md`）。
+  （本次随 Arduino 包提供的 SDK 为 4.4.7，主体 Apache-2.0）。**lwIP**
+  使用 BSD-3-Clause，其他 SDK 组件按各自文件许可；不能全部归为 Apache-2.0。
+  本次 S2 SDK 配置确认 `CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6`，吞吐仍需真机验证。
 * **esptool** — <https://github.com/espressif/esptool>（GPL-2.0）
 * **SimHei**（`simhei.ttf`）— `tools/gen_cjk_font.py` **离线**栅格化字形所用的
   Windows 系统字体。仓库只提交生成的 16×16 点阵，不随仓库再分发字体文件。未证实提取字形可再分发。
 * **Node.js** — `tools/*.js` 辅助脚本使用（MIT）。
+* **Pillow** — <https://github.com/python-pillow/Pillow>（HPND 及所用版本的附属许可），
+  仅在生成字体点阵时使用。使用生成工具的许可不替代输入字体的许可。
 
 ---
 

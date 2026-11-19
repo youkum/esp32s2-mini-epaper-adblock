@@ -12,8 +12,8 @@
 > 标识符等技术术语一律保留英文原文**，以免翻译造成歧义。例如 `EPD DC`
 > 不译作「直流」、`EPD BUSY` 不译作「繁忙」、`MIT` 不译作「麻省理工学院」。
 >
-> **AI 构建项目。** 本文内容由 AI 代理编写并在真实硬件上验证。信任前请先阅读
-> [AI 构建声明](README.md#ai-构建声明)。
+> 本文由 AI 代理辅助维护。历史硬件数据和本次构建验证分别见
+> [性能与已知上限](#15-性能与已知上限)和[构建验证记录](docs/BUILD-VERIFICATION.md)。
 
 ---
 
@@ -44,21 +44,24 @@
 **硬件**
 
 * 一块 **ESP32-S2 mini** 开发板。已在 **ESP32-S2FNR2** 上验证：4 MB flash +
-  **2 MB PSRAM**。PSRAM 是必需的——128 KB Bloom filter 就分配在那里。
-  没有 PSRAM 的型号无法工作。
+  **2 MB PSRAM**。推荐使用同型号：128 KB Bloom filter 放在 PSRAM 中。
+  分配失败会回退到 flash 查找，性能会降低；其他板型未作为部署目标验收。
 * 一块 **7.5 英寸 768×552 四色电子纸**，JDY79668 / GDEY075Z08 class。
 * 一根 USB-C（或 USB-micro，视板子而定）**数据线**。
 * 9 根母对母杜邦线。
-* 可选：接在 Battery ADC 引脚上的 LiFePO4 / 18650 电池，做成无线版本。
+* 使用稳定的板卡电源；Battery ADC 是电压测量输入，不能直接接电池供电。
+  电池方案需自行设计稳压、充电保护和 ADC 分压，并遵守板卡额定电压。
 
 **软件**
 
-* **PlatformIO Core**（`python -m pip install --upgrade platformio`），或
+* **PlatformIO Core 6.2.0**（本次验证版本），或
   PlatformIO IDE 插件。
-* **Python 3.8+**，用于辅助脚本。
+* **Python 3.10+**，用于 PlatformIO 和辅助脚本。
 * **Node.js**，用于 `tools/*.js` 的字体 / 预览脚本（可选，只有改屏上文字时
   才需要）。
-* **esptool**（PlatformIO 会自动安装；只有走合成镜像路径时才直接用到）。
+* **Pillow 8.0+**，仅在重新生成中文字形时需要；普通构建使用已提交的字形表。
+* **esptool**：PlatformIO 自带的副本用于上传和合成；直接运行 `python -m esptool`
+  需要在当前 Python 环境中另行安装。
 
 **知识**
 
@@ -99,15 +102,26 @@
 ## 3. 安装工具链
 
 ```bash
-python -m pip install --upgrade platformio
+git clone https://github.com/youkum/esp32s2-mini-epaper-adblock.git
+cd esp32s2-mini-epaper-adblock
+python -m pip install "platformio==6.2.0"
 ```
 
-首次构建时，PlatformIO 会下载 `espressif32` platform、Arduino-ESP32 framework
-和工具链。这个下载很大（数百 MB），网络慢请耐心等待。
+后文命令默认从仓库根目录执行，代码块适用于 PowerShell / Bash；出现 `cd` 时
+只影响该示例。已有检出可跳过 clone。`python` 必须指向安装了 PlatformIO 的解释器。
 
-> 网络很慢时，可以用 `tools/fetch_pio_framework.js` 通过多条并行 HTTP range
-> 请求直接把 framework tarball 拉进 PlatformIO 的缓存。见
-> [tools 目录](#14-tools-目录)。
+项目固定 `espressif32@6.12.0`，使用 Arduino-ESP32 2.0.17。首次构建下载工具链，
+需要联网和数百 MB 空间；依赖完整安装后普通构建不需要下载列表或字体。
+不要把平台版本改成不带版本号的 `espressif32`，那会自动选取不同的 SDK。
+
+Windows 若遇到解压路径过长，可在当前 PowerShell 设置一个较短、可写的缓存路径：
+
+```powershell
+$env:PLATFORMIO_CORE_DIR = 'C:\pio-adblock'
+```
+
+这会使用独立缓存并重新安装依赖。构建、`buildfs`、上传和 `make_release.py`
+应在同一环境中运行；新终端要重新设置该变量。下载失败先检查网络并重试。
 
 ---
 
@@ -116,18 +130,11 @@ python -m pip install --upgrade platformio
 固件位于子目录 `3.98/merged-adblock-epd/`，默认 PlatformIO 环境为 `s2mini`。
 
 ```bash
-python -m platformio run -d 3.98/merged-adblock-epd
+python -m platformio run -d 3.98/merged-adblock-epd -e s2mini
 ```
 
-成功构建以类似下面的输出结尾：
-
-```
-RAM:   [==        ]  25.0% (used ... bytes from 327680 bytes)
-Flash: [========= ]  87.3% (used ... bytes from 1179648 bytes)
-========================= [SUCCESS] =========================
-```
-
-产物位于 `3.98/merged-adblock-epd/.pio/build/s2mini/`：
+成功构建以 `[SUCCESS]` 结尾。实际大小与版本见[构建验证记录](docs/BUILD-VERIFICATION.md)。
+文件位于 `3.98/merged-adblock-epd/.pio/build/s2mini/`：
 
 | 文件 | 用途 |
 |---|---|
@@ -136,36 +143,47 @@ Flash: [========= ]  87.3% (used ... bytes from 1179648 bytes)
 | `partitions.bin` | partition table |
 | `firmware.elf` / `.map` | 调试符号 / 内存映射 |
 
-**flash 预算。** 镜像约占 1.125 MB OTA slot 的 **87%**。还有增长空间，但不大
-——大改动后请留意这个数字。
+**flash 预算。** 每个 OTA slot 为 `0x120000`（1,179,648 字节，即 1.125 MiB）。
+构建输出的 RAM 数值只描述静态占用；运行时 WiFi、堆和 PSRAM 仍需通过日志观察。
+`firmware.bin` 是应用程序；`firmware-merged.bin` 是从 0x0 烧写的整合镜像，两者不能互换。
 
 ---
 
 ## 5. 烧写
 
-### 方式 A — 常规上传（app + 文件系统）
+### 方式 A — 首次部署（app + 文件系统）
 
 ```bash
-python -m platformio run -d 3.98/merged-adblock-epd -t upload      # 应用程序
-python -m platformio run -d 3.98/merged-adblock-epd -t uploadfs    # LittleFS（blocklist）
+python -m platformio device list
+python -m platformio run -d 3.98/merged-adblock-epd -e s2mini -t upload --upload-port COM3
+python -m platformio run -d 3.98/merged-adblock-epd -e s2mini -t uploadfs --upload-port COM3
 ```
+
+`COM3` 替换为实际端口；Linux 常为 `/dev/ttyACM0`，macOS 常为 `/dev/cu.usbmodem...`。
+`uploadfs` 会重新生成并覆盖整个 LittleFS，丢失其中已有的密码、WiFi、自定义规则、
+封禁和累计统计。**日常升级只执行 `upload`，或通过 Web OTA 上传 `firmware.bin`。**
+若分区表发生变化，应按首次部署处理；升级前记录必要配置。
 
 ### 方式 B — 合成单个镜像，从 0x0 烧写
 
 ```bash
-python -m platformio run -d 3.98/merged-adblock-epd -t buildfs
+python -m platformio run -d 3.98/merged-adblock-epd -e s2mini
+python -m platformio run -d 3.98/merged-adblock-epd -e s2mini -t buildfs
 python 3.98/merged-adblock-epd/tools/make_release.py
-esptool.py --chip esp32s2 --port COMx write_flash 0x0 \
-    3.98/merged-adblock-epd/firmware-merged.bin
+python -m pip install "esptool==4.9.0"
+python -m esptool --chip esp32s2 --port COM3 write_flash 0x0 3.98/merged-adblock-epd/firmware-merged.bin
 ```
 
+合成镜像会以填充字节覆盖 NVS 区域，并以打包内容覆盖 LittleFS：原有 WiFi、密码和
+统计可能丢失。它用于首次部署 / 重新初始化，**不能作为 Web OTA 文件**。
+`--no-fs` 只省略文件系统，不能使整合镜像成为保留配置的升级方式。
 见 [构建合成发行镜像](#13-构建合成发行镜像)。
 
 ### 关于首次 upload 失败
 
-在控制台走芯片**原生 USB CDC**（无 UART 桥）的板子上，`upload` 几乎每次都会
-在第一次失败，报 `OSError(22, 'device does not support the request')`——芯片
-重新枚举时端口会消失。**再跑一次即可**，第二次就成功。
+原生 USB CDC 板子可能因重新枚举出现 `OSError(22)`。关闭占用端口的串口工具，
+等端口重新出现后更新端口名并重试。仍失败时按住 BOOT、按一下 RESET，再松开 BOOT
+进入下载模式；没有 RESET 键的板子可按住 BOOT 后重新插入 USB。烧写后复位启动。
 
 `tools/flash_and_capture.ps1`（Windows）会自动重试，并抓取串口控制台：
 
@@ -173,11 +191,18 @@ esptool.py --chip esp32s2 --port COMx write_flash 0x0 \
 powershell -File 3.98/merged-adblock-epd/tools/flash_and_capture.ps1 -Port COM3 -CaptureSec 45
 ```
 
-加 `-SkipBuild` 可跳过重新构建直接烧写。
+脚本默认从自身位置定位固件目录，不依赖旧电脑路径；`-Root` 可指定其他检出。
+它只上传应用程序，不上传文件系统。`-SkipBuild` 使用已有构建产物，应确认版本。
 
 > **读取原生 USB 控制台需要同时拉高 DTR 和 RTS。** ESP32-S2 的 USB CDC 只有在
 > 两者都置位时才报告 "connected"。很多串口工具默认把它们拉低，于是设备发出的
 > 每个字节都被静默丢弃。抓取脚本已替你置位。
+
+也可单独监控串口：
+
+```bash
+python -m platformio device monitor --port COM3 --baud 115200 --dtr 1 --rts 1
+```
 
 ---
 
@@ -210,7 +235,8 @@ AdBlock EPD booting (reset=3 heap=144544 psram=2095103)
 
 ## 7. 接入网络
 
-凭据按以下顺序尝试，第一个存在的胜出：
+开机按以下优先级选择一组凭据；所选网络连接失败后进入 portal，
+不会继续轮流测试优先级更低的网络：
 
 1. **`/wifi.cfg`**（LittleFS）——由 setup portal 写入。
 2. **`secrets.h`**（`WIFI_SSID` / `WIFI_PASS`）——除非仍是出厂占位符。
@@ -249,17 +275,34 @@ AdBlock EPD booting (reset=3 heap=144544 psram=2095103)
 
 设备就是端口 53 上的普通 DNS 服务器（UDP + TCP）。两种用法：
 
-**推荐 —— 整个网络：** 把它设为路由器的上游 DNS：
+**推荐 —— 整个网络：** 在路由器中为设备做 DHCP 地址保留，固定它的 IP，
+再把该 IP 作为 DHCP 发给客户端的 DNS 地址。只修改路由器自身的上游 DNS 时，
+应确认它会代客户端转发，否则不一定覆盖所有设备。
 
 ```
-primary DNS   -> 设备 IP (例如 192.168.10.190)
-secondary DNS -> 任意一台「非」sinkhole 的 DNS
+DNS -> 设备固定 IP（例如 192.168.10.190）
+第二个 DNS -> 留空，或另一台有相同拦截规则的 DNS
 ```
 
 **单客户端：** 只把你关心的设备指向该设备 IP。
 
 设备**不**运行 DHCP，因此它不必是网关——只需作 resolver。被拦截的查询返回
 `0.0.0.0` / `::`；其余则是从 `9.9.9.9` 转发回来的真实答案。
+
+普通公共 DNS 作为第二地址时，客户端可能随时使用它，造成拦截绕过。
+若主动选择公共 DNS 以提高可用性，应接受这一取舍。同步检查路由器 IPv6 DNS
+通告、系统私有 DNS 和浏览器 DoH，避免客户端走其他解析器。
+路由器代转发时，按客户端统计可能只看到路由器 IP。
+
+先用单客户端验证，再推广到全网；重启或清理客户端 DNS 缓存后查询：
+
+```bash
+nslookup example.com 192.168.10.190
+nslookup doubleclick.net 192.168.10.190
+```
+
+第一条应能解析；第二条在当前列表包含该域名时应返回 `0.0.0.0`（A）。
+需要独立验证 TCP 时，使用已安装的 `dig +tcp @192.168.10.190 example.com`。
 
 ---
 
@@ -282,15 +325,18 @@ secondary DNS -> 任意一台「非」sinkhole 的 DNS
 | 网络 | 修改 WiFi |
 | 管理员密码 | 修改 `admin` 密码 |
 
-**认证模型。** Basic Auth（`admin` + 你的密码）加上一个 CSRF `token`；token
-由 `/stats` 返回，每次写操作都必须带上。页面每 5 s 拉取一次 `/stats`。
+**认证模型。** Web 控制台使用 Basic Auth（`admin` + 密码），页面每 5 s 拉取
+`/stats`。配置修改接口还检查它返回的 CSRF `token`；当前固件上传和列表上传
+接口检查 Basic Auth，未检查 CSRF token。AP 配网的 `/setwifi` 不要求认证。
+页面为局域网 HTTP 服务，应在可信局域网中使用；不要把管理端口映射到公网。
 
 ---
 
 ## 10. 电子纸仪表盘
 
 面板**每 3 分钟**做一次四色全刷（`DASH_REFRESH_MS`）。每次刷新端到端约 17 s，
-但在后台运行，因此 DNS 持续应答（见 [架构说明](#17-架构说明)）。
+其中约 15 s 的面板 BUSY 等待在后台运行。帧渲染和传输仍同步占用主循环约 1–1.4 s，
+这段时间可能增加 DNS 延迟或丢包（见 [架构说明](#17-架构说明)）。
 
 显示内容：
 
@@ -300,9 +346,10 @@ secondary DNS -> 任意一台「非」sinkhole 的 DNS
 * 页脚：累计值、uptime 与最后更新时间。
 
 **手动刷新：** 控制台的 **立即刷新屏幕** 按钮，或**短按** BOOT 键。
+Web 返回 HTTP 202 表示请求已排队，面板空闲后执行；重复请求合并为一次待刷新。
 
 不用烧写也能在 PC 上预览版式：`node 3.98/merged-adblock-epd/tools/preview_dashboard.js`
-→ `preview-dashboard.png`。
+→ `3.98/merged-adblock-epd/preview-dashboard.png`。
 
 ---
 
@@ -328,25 +375,31 @@ secondary DNS -> 任意一台「非」sinkhole 的 DNS
 对外分发列表或含列表的固件前，先核对 [第三方声明](THIRD-PARTY-NOTICES.md)。
 
 ```bash
-cd 3.98/merged-adblock-epd
-python tools/build_blocklist.py data/blocklist.bin           # StevenBlack + Hagezi Light
-python tools/build_blocklist.py data/blocklist.bin a.txt b.txt   # 你自己的列表/URL
+python 3.98/merged-adblock-epd/tools/build_blocklist.py 3.98/merged-adblock-epd/data/blocklist.bin
+# 或指定本地文件 / URL；a.txt、b.txt 为相对当前终端目录的路径
+python 3.98/merged-adblock-epd/tools/build_blocklist.py 3.98/merged-adblock-epd/data/blocklist.bin a.txt b.txt
 ```
 
 选项：
 
 | 参数 | 含义 |
 |---|---|
-| `--bloom-bits N` | Bloom filter 位数（默认 1,048,576 = 128 KB） |
+| `--bloom-bits N` | Bloom filter 位数（默认 1,048,576 = 128 KiB，建议保持默认） |
 | `--no-bloom` | 跳过 Bloom filter |
 
 格式固定：20-byte header + Bloom filter + 排序后的 40-bit 哈希，magic `CADB`、
 `HASH_BYTES = 5`。与上游项目**字节兼容**。
 
+默认列表需要联网，结果会随上游分支变化。格式兼容不代表任意列表都能装入：
+文件必须完整、含至少一条哈希，并且放得下 LittleFS；替换时还需同时容纳旧文件和新文件。
+构建器会跳过读取失败的输入，甚至可能生成空列表；使用前检查输出的来源错误、
+哈希数量和体积。远程更新 URL 必须返回 `CADB` 二进制，不能直接填 hosts / 域名文本 URL。
+
 ### 上传列表
 
-* **从 PC：** 把 `blocklist.bin` 放进 `data/` 后 `pio run -t uploadfs`，或用
-  控制台的 规则更新 卡片上传 `.bin`。
+* **已有设备：** 优先用控制台的 规则更新 卡片上传 `blocklist.bin`，保留其他配置。
+* **首次部署：** 把文件放进 `data/` 后执行本指南第 5 节的 `uploadfs`。
+  已有设备使用此方式会覆盖整个文件系统。
 * **远程自动更新：** 把你的 `.bin` 托管到某处并在控制台填 URL；设备会按你选的
   间隔重新下载。
 
@@ -367,8 +420,13 @@ python tools/build_blocklist.py data/blocklist.bin a.txt b.txt   # 你自己的�
 合成镜像是一整块从 `0x0` 烧写的单文件——方便 ESP Web Tools、`esptool-js`，
 或交给他人。
 
+本节命令仅生成本地产物。公开分发前必须处理
+[第三方声明](THIRD-PARTY-NOTICES.md)中的列表出处、字体和平台组件事项，
+保存源码提交、工具链版本、构建命令和文件校验和。历史二进制不能当作当前源码的验证结果。
+
 ```bash
-python -m platformio run -d 3.98/merged-adblock-epd -t buildfs
+python -m platformio run -d 3.98/merged-adblock-epd -e s2mini
+python -m platformio run -d 3.98/merged-adblock-epd -e s2mini -t buildfs
 python 3.98/merged-adblock-epd/tools/make_release.py
 # -> 3.98/merged-adblock-epd/firmware-merged.bin
 ```
@@ -383,9 +441,11 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 | `0x10000` | `firmware.bin` |
 | `0x250000` | `littlefs.bin`（blocklist） |
 
-> **`-t buildfs` 很重要。** 没有它，`make_release.py` 仍会运行，但会漏掉文件
-> 系统（打印 `(absent: run 'pio run -t buildfs' ...)`），烧出来的设备拦不住
-> 任何东西、仪表盘也是空的。只有在你**故意**想要那样时才加 `--no-fs`。
+`make_release.py` 默认要求全部产物齐备，并检查它们不超过对应容量；
+缺少 `littlefs.bin` 会报错。显式 `--no-fs` 可以省略文件系统，但空设备将没有默认列表。
+该脚本固定用于 `s2mini`，应用和文件系统偏移、容量读取自 `partitions.csv`。
+它使用 `PLATFORMIO_CORE_DIR` 对应的 esptool，默认是用户目录下的 `.platformio`。
+输出包括 SHA-256；脚本不会上传 GitHub、烧写设备或自动核对再分发许可。
 
 **预编译合成镜像**在
 [Releases](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases) 页面。
@@ -394,28 +454,35 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 
 ## 14. tools 目录
 
-`3.98/merged-adblock-epd/tools/` —— 全部可在仓库根目录离线运行。
+`3.98/merged-adblock-epd/tools/` 中各工具用完整路径调用；不能假定它们都离线或都
+可直接无参数运行。路径规则与额外依赖如下：
 
 | 工具 | 作用 |
 |---|---|
 | `build_blocklist.py` | 编译源列表 → `blocklist.bin` |
 | `test_build_blocklist.py` | blocklist 构建器的单元测试 |
+| `test_make_release.py` | 合成脚本的缺文件、容量和分区偏移回归检查 |
 | `make_release.py` | 合并构建产物 → `firmware-merged.bin` |
-| `gen_cjk_font.py` | 从 SimHei 栅格化中文点阵字体表 |
+| `gen_cjk_font.py` | 从所选字体生成点阵；需 Pillow 和有适用许可的字体文件 |
 | `check_font.js` | 报告 UI 中缺失于字体表的字符 |
 | `preview_dashboard.js` | 不烧写即渲染 `preview-dashboard.png` |
 | `flash_and_capture.ps1` | 带重试的烧写 + 抓串口控制台（Windows） |
-| `fetch_pio_framework.js` | 通过并行 range 请求拉取 framework tarball |
-| `probe_flash.ps1` / `read_part.ps1` | 回读 flash 分区 |
+| `fetch_pio_framework.js` | 联网下载缓存辅助工具；需提供 URL、缓存目标、SHA-256、字节数，非通用安装器 |
+| `probe_flash.ps1` / `read_part.ps1` | 历史回读调试脚本，包含原开发机路径；使用前自行适配，不是部署步骤 |
 
-注意 `gen_cjk_font.py` 需要 **SimHei**（`simhei.ttf`，Windows 自带）；在其他
-系统上用 `CJK_FONT` 环境变量覆盖。
+普通构建无需重生成字体。修改屏上文字后先安装 `python -m pip install "Pillow>=8.0"`，
+使用 `CJK_FONT` 指向自己有权使用的字体文件，再运行生成脚本、`check_font.js` 和预览。
+脚本默认查找 Windows 的 `simhei.ttf`，不保证系统已安装；该字体的点阵再分发许可
+尚未确认，公开发行前需处理[第三方声明](THIRD-PARTY-NOTICES.md)中的字体项。
 
 ---
 
 ## 15. 性能与已知上限
 
-**延迟**（硬件实测，单条查询）：
+以下是改动前的历史硬件参考，测试网络、工具链和脚本未完整归档，不能作为当前版本承诺。
+当前编译通过也不代表这些指标已复测。
+
+**延迟**（历史硬件实测，单条查询）：
 
 | 查询类型 | p50 | p90 |
 |---|---|---|
@@ -423,8 +490,7 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 | forwarded（上游） | ~245 ms | ~255 ms |
 | NXDOMAIN | ~246 ms | ~263 ms |
 
-**吞吐。** 家用 resolver 是个位数 qps，无损。持续负载在接近 100 qps 时开始
-出现问题：
+**吞吐。** 历史持续负载记录：
 
 | 提供速率 | 丢包 |
 |---|---|
@@ -433,9 +499,9 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 | ~200 qps | ~77% |
 | ~300 qps | ~87% |
 
-该上限是**单次突发约 6 个数据报的硬天花板**——lwIP 的 UDP 接收邮箱深度
+原测试环境的**单次突发约 6 个数据报上限**对应 lwIP 的 UDP 接收邮箱深度
 （`CONFIG_LWIP_UDP_RECVMBOX_SIZE = 6`，编译进预制的 `liblwip.a`）。把查询间隔
-拉开到 10 ms 几乎可全部收回。这是**已记录、已接受的上限**，不是 bug：完整推理
+拉开到 10 ms 的历史测试几乎可全部收回。完整推理
 与「为何 `parsePacket()` 排空循环无济于事」见
 [`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md) 的 "burst ceiling" 条目。
 
@@ -463,10 +529,14 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 | 画面空白 / 陈旧，`refresh=` 只有几毫秒 | 面板更新未被接受。检查接线（尤其 BUSY 在 GPIO 4）与供电。 |
 | 画面被撕裂 / 镜像 | band-window 或旋转变换被破坏。只能通过 `drawTextColor()` / `fillRectColor()` 绘制，且每行的 window 必须由其**数据行**推导——见 `AGENTS.md`。 |
 | 面板似乎一直不更新 | 四色全刷要 ~15 s 且会闪烁；给它时间。 |
-| `pio` 下载卡住 | 用 `tools/fetch_pio_framework.js`，或换个好网络重试。 |
+| `pio` 下载卡住 | 检查网络后重试；依赖下载量较大。高级缓存下载工具需要完整参数，见第 14 节。 |
 | 重新烧写后控制台 401 | 合成镜像没有 `/auth.cfg`，已生成新密码——读串口日志。 |
-| 整个网络失去 DNS | 设备宕机或掉线；路由器应配置一个非 sinkhole 的备用 DNS。 |
-| 中文显示成空白方框 | `cjk_font.cpp` 缺字。跑 `node tools/check_font.js`，再用 `gen_cjk_font.py` 重新生成。 |
+| 整个网络失去 DNS | 检查设备电源、WiFi 和地址保留；可临时切回公共 DNS 恢复网络，但这期间拦截会被绕过。 |
+| 中文显示成空白 / 缺字 | 运行 `node 3.98/merged-adblock-epd/tools/check_font.js`；缺字时按第 14 节重生成，检查预览。 |
+| 只有部分客户端没有拦截 | 检查 DHCP DNS、IPv6 DNS、系统私有 DNS、浏览器 DoH 和缓存。 |
+| HTTPS 规则下载失败 | 当前代码没有为 `WiFiClientSecure` 配置 CA；改用 Web 上传二进制，或自行配置并验证 CA。 |
+| 上传列表失败 | 必须是完整的 v1 `CADB` 文件；检查大小及 LittleFS 是否能同时容纳旧列表和新文件。 |
+| 编译依赖解压报路径过长 | 固定项目平台版本，并按第 3 节设置较短的 `PLATFORMIO_CORE_DIR`。 |
 
 ---
 
@@ -475,10 +545,10 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 以下是固件赖以成立的规则；完整细节见
 [`AGENTS.md`](3.98/merged-adblock-epd/AGENTS.md)。
 
-* **没有全帧缓冲。** 768×552 @ 2 bpp 为 105,984 字节——在 S2 的 176 KB DRAM
-  （还要与 WiFi 共享）里放不下。画面从不整体物化：`epdSendFrame()` 一次渲染
+* **没有全帧缓冲。** 768×552 @ 2 bpp 为 105,984 字节；S2 标称 320 KiB RAM
+  并非都可用作画布，内部堆还与 WiFi、网络栈共享。画面不整体物化：`epdSendFrame()` 一次渲染
   并流式发送**一个 64 行的 band**，写入 12,288 字节的静态缓冲。
-* **绝不阻塞 `loop()`。** 一帧发完后玻璃会把 BUSY 拉低约 15 s；先让
+* **面板 BUSY 等待不占用 `loop()`。** 帧渲染和发送仍同步执行；一帧发完后 BUSY 拉低约 15 s，先让
   `epdSendFrame()` 返回，由 `loop()` 驱动 `epdServiceRefresh()`，DNS 才能持续
   应答。
 * **两个相互抵消的旋转变换。** `drawTextColor()` / `fillRectColor()` 应用其一，
@@ -486,7 +556,7 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 * **window 由数据行推导**，绝不用运行计数器——见 `epd_driver.cpp` 里的 `0x83`
   window 映射。
 * **PSRAM 是刻意使用的**（128 KB Bloom filter）；每次查询的热状态留在 DRAM。
-* **DNS 热路径不分配内存**——`trackerRecord()` 不用 `String`、不 `malloc`、
+* **追踪热路径避免分配**——`trackerRecord()` 不用 `String`、不 `malloc`、
   不打日志。
 
 ---
