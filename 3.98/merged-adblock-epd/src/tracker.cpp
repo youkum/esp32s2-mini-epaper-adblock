@@ -3,8 +3,7 @@
 #include <time.h>
 
 // ── 存储 ────────────────────────────────────────────────────
-static TopEntry top[TOPN_KEEP];
-static int      topCount = 0;
+static TopCounter<TOPN_KEEP> top;
 
 static uint32_t histBlocked[HIST_SLOTS];
 static uint32_t histTotal[HIST_SLOTS];
@@ -26,21 +25,9 @@ static int histHourNow() {
   return t.tm_hour;
 }
 
-// 保持前 TOPN_KEEP 个条目按计数降序排列，这样 trackerGetTop()
-// 只需原样复制一个前缀。用交换循环把一个条目下沉，在最长
-// 12 个条目的列表上是 O(n)。
-static void demoteIfNeeded(int idx) {
-  while (idx + 1 < topCount && top[idx].count < top[idx + 1].count) {
-    TopEntry tmp = top[idx];
-    top[idx] = top[idx + 1];
-    top[idx + 1] = tmp;
-    idx++;
-  }
-}
-
 // ── 初始化 / 持久化 ─────────────────────────────────────────
 void trackerInit() {
-  topCount = 0;
+  top.clear();
   for (int i = 0; i < HIST_SLOTS; i++) { histBlocked[i] = 0; histTotal[i] = 0; }
   todayBlocked = todayTotal = 0;
 }
@@ -66,13 +53,13 @@ void trackerSave() {
 // ── 日切换 ──────────────────────────────────────────────────
 void trackerRollDay() {
   todayBlocked = todayTotal = 0;
-  topCount = 0;
+  top.clear();
   for (int i = 0; i < HIST_SLOTS; i++) { histBlocked[i] = 0; histTotal[i] = 0; }
 }
 
 // ── 记录 ────────────────────────────────────────────────────
 // 每个 DNS 查询都会执行到这里，因此必须保持无内存分配且有
-// 确定上界：只对最多 12 个条目做一次线性扫描，不用 String，
+// 确定上界：只对最多 12 个完整域名候选做线性扫描和有界上浮，不用 String，
 // 不用 malloc。
 void trackerRecord(const char* domain, bool blocked) {
   if (blocked) { todayBlocked++; allBlocked++; } else { todayTotal++; allTotal++; }
@@ -85,25 +72,12 @@ void trackerRecord(const char* domain, bool blocked) {
 
   if (!blocked || !domain || !domain[0]) return;
 
-  for (int i = 0; i < topCount; i++) {
-    if (strcmp(top[i].domain, domain) == 0) { top[i].count++; demoteIfNeeded(i); return; }
-  }
-  if (topCount < TOPN_KEEP) {
-    strncpy(top[topCount].domain, domain, sizeof(top[0].domain) - 1);
-    top[topCount].domain[sizeof(top[0].domain) - 1] = 0;
-    top[topCount].count = 1;
-    topCount++;
-    demoteIfNeeded(topCount - 1);
-  }
+  top.record(domain);
 }
 
 // ── 访问器 ──────────────────────────────────────────────────
 void trackerGetTop(TopEntry* out, int n) {
-  if (n > TOPN_KEEP) n = TOPN_KEEP;
-  for (int i = 0; i < n; i++) {
-    if (i < topCount) out[i] = top[i];
-    else { out[i].domain[0] = 0; out[i].count = 0; }
-  }
+  top.get(out, n);
 }
 
 uint32_t trackerHourBlocked(int h) { return (h >= 0 && h < HIST_SLOTS) ? histBlocked[h] : 0; }

@@ -1,0 +1,38 @@
+name: 固件回归与构建
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 运行共享 C++ 与脚本回归
+        run: |
+          python 3.98/merged-adblock-epd/tools/test_native.py --compiler clang++
+          python 3.98/merged-adblock-epd/tools/test_build_blocklist.py
+          python 3.98/merged-adblock-epd/tools/test_regressions.py
+          python 3.98/merged-adblock-epd/tools/test_make_release.py
+          node 3.98/merged-adblock-epd/tools/check_font.js
+      - name: 编译 ESP32-S2 与文件系统
+        run: |
+          python -m pip install 'platformio==6.2.0'
+          python -m platformio run -d 3.98/merged-adblock-epd -e s2mini
+          python -m platformio run -d 3.98/merged-adblock-epd -e s2mini -t buildfs
+          python 3.98/merged-adblock-epd/tools/make_release.py
+      - name: 保存构建产物（不自动发布）
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2mini-test-firmware
+          path: |
+            3.98/merged-adblock-epd/.pio/build/s2mini/firmware.bin
+            3.98/merged-adblock-epd/.pio/build/s2mini/littlefs.bin
+            3.98/merged-adblock-epd/firmware-merged.bin

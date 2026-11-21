@@ -36,9 +36,11 @@
   `canvasBindBand()` 绑定分带并裁剪。
 - 128 KiB Bloom filter 使用 `MALLOC_CAP_SPIRAM`；分配失败回退到 flash 查找，
   不用 DRAM 承接该大表。每次查询的热状态保留在内部内存。
-- 面板 BUSY 等待不得阻塞 `loop()`。帧传输仍是同步的，历史约 1–1.4 s；
-  此后约 15 s 的面板刷新由 `epdServiceRefresh()` 服务。发新帧前等待面板空闲，
-  不要因短按 BOOT、Web 刷新或配网提示而重新初始化仍在 BUSY 的面板。
+- 面板复位、上电、分行发送、刷新、断电必须用状态机，禁止 BUSY / 复位 delay 等待。
+  `epdSendFrame()` 只提交，`epdRefreshActive()` 覆盖所有在途阶段，重复请求排队合并。
+  每次服务最多两条完整行，每分带回调一次，字节内部 bit-bang 时序不变。
+  BUSY 阶段 45 s、单次尝试整帧 120 s 上限；失败退避 2 s，最多再试两次。
+  分带渲染使用固定统计 / 时间 / IP 快照，故障重试不得改变快照。
 - BOOT 按键去抖和长按检测不得等待释放；短按 / Web 刷新排队，多次请求合并。
   长按进入 AP 配网会断开 STA，不承诺这期间保持局域网 DNS 服务。
 - `[EPD] refresh=` 的历史正常值约 15 s；几十毫秒提示面板可能未接受更新。
@@ -57,14 +59,22 @@
 - 黑名单 v1 头部、magic `CADB` 和 `HASH_BYTES = 5` 与构建器保持同步。
   更新先写临时文件，检查非空、头部和精确长度，再通过 LittleFS rename 替换旧文件。
   不能先删除旧列表；替换失败后恢复旧列表的打开状态。结构校验不验证数据出处或排序内容。
-- 远程列表下载目前同步执行，可能影响 DNS；HTTPS 当前未配置 CA，不能绕过证书验证。
+- 远程任务只拥有网络和 `/blocklist.tmp`，关闭文件后通过队列通知主循环安装。
+  禁止任务改全局 Bloom / 主表句柄，禁止与本地列表上传 / OTA 并行更新。
+  HTTPS 需 PEM CA 和 NTP 对时，不得 setInsecure；响应头 / 分块解析必须有长度和时间上界。
+  WebServer multipart 仍同步解析，本地上传可能暂停 DNS，不得声称完全无阻塞。
 - WiFi 凭据按 `/wifi.cfg`、已填写的 `secrets.h`、ESP-IDF NVS 的顺序选择一组，
   不是连接失败后轮流试完三组。保留 NVS 回退，便于继承原板卡已有网络。
 - `LittleFS.begin()` 必须显式传入 `LFS_PARTITION`：分区标签是 `littlefs`，
   默认的 `spiffs` 标签无法挂载它。`uploadfs` 覆盖整个文件系统，日常升级通常只上传 app。
-- `connectWifi()` 开机调用，运行中掉线也要由 `loop()` 重连；当前每 30 s 尝试，
-  重置无线连接后再次调用 `connectWifi()`，达到连续失败阈值后开启 portal。
+- `connectWifi()` 只启动关联；`serviceWifi()` 轮询连接边沿 / 期限，不得等待关联完成。
+  开机 15 s 超时进 AP；运行中失败退避 30 s，六次失败进 AP，成功重绑 DNS 套接字。
   只有 `WL_CONNECTED` 表示 STA 链路可用。
+- DNS 缓存固定 16 项 / 每项 512 字节，保守正响应；TTL 递减，最长驻留 300 s。
+  不缓存 EDNS、TC、错误、权威 / 附加节；规则、封禁、上游和网络变更失效。
+  主上游 2 s 超时切备用，再等 2 s；来源、端口、事务 ID 和问题必须全部校验。
+- TopN 为固定 12 项 Space-Saving，保存完整域名；count 为上界，count-error 为下界，
+  不能把估计榜单描述成无限域名集合的精确统计。
 - 只有累计总数持久化到 `/totals.cfg`；今日统计、每小时直方图及域名排行重启后重置。
 - `src/cjk_font.cpp` 是由 `tools/gen_cjk_font.py` 生成的 16x16 点阵表。
   缺字运行时显示为空白；修改屏上文字后使用有适用许可的字体重生成，再跑缺字检查和预览。
@@ -75,7 +85,8 @@
   `DASHBOARD_ETAG`，防止旧页面缓存。保持中文、自包含，不新增 CDN 或外部字体。
 - Basic Auth 用户固定为 `admin`；`/auth.cfg` 第 1 行是密码，第 2 行是 CSRF token。
   密码每次开机通过串口打印，保留这条恢复方式。配置修改接口校验 token；
-  当前二进制上传接口仅校验 Basic Auth，不能把文档写成所有写接口均有 CSRF。
+  二进制上传在 START 阶段检查 Basic Auth 与 128 bit CSRF token，失败不写 flash。
+  OTA 必须通过完整长度、ESP32-S2 头部和 ESP-IDF 镜像校验才激活；失败不重启。
 
 ## 构建与检查
 
@@ -85,6 +96,8 @@
 python -m platformio run -e s2mini
 python tools/test_build_blocklist.py
 python tools/test_make_release.py
+python tools/test_regressions.py
+python tools/test_native.py
 node tools/check_font.js
 ```
 

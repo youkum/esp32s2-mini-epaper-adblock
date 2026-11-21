@@ -74,10 +74,23 @@ sinkhole，不使用 InkSight 的服务；仍会访问上游 DNS、NTP 和用户
 * **SimHei**（`simhei.ttf`）— `tools/gen_cjk_font.py` **离线**栅格化字形所用的
   Windows 系统字体。仓库只提交生成的 16×16 点阵，不随仓库再分发字体文件。未证实提取字形可再分发。
 * **Node.js** — `tools/*.js` 辅助脚本使用（MIT）。
+* **Zig 0.14.1** — <https://ziglang.org/>（MIT，附带 LLVM / Clang 等组件各按其许可）；
+  本轮仅用于 Windows 原生 C++ 回归测试，不进入固件或 Release 附件。
+* **Mbed TLS** — 随 ESP-IDF SDK 使用，CA 解析、TLS 与 SHA-256 的实现；
+  条款按 SDK 内实际组件处理，不作为本项目自创算法。
 * **Pillow** — <https://github.com/python-pillow/Pillow>（HPND 及所用版本的附属许可），
   仅在生成字体点阵时使用。使用生成工具的许可不替代输入字体的许可。
 
 ---
+
+## 5. 新实现与算法 / 协议参考
+
+v1.3.0 的固定候选计数器、DNS 缓存和有界 HTTP 读取器由本仓库实现，没有引入外部
+应用库；不将这些后续改动全部归为原 DNS / 面板上游的工作。
+Space-Saving 算法参考 Metwally、Agrawal、El Abbadi 的
+[UCSB 2005-23 技术报告](https://cs.ucsb.edu/research/tech-reports/2005-23)，
+不是复制报告源码。DNS 报文和 TTL 语义参考
+[RFC 1035](https://www.rfc-editor.org/rfc/rfc1035)；本实现只支持指南列明的保守子集。
 
 ## 许可证全文
 

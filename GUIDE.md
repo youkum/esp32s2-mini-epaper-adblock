@@ -36,6 +36,7 @@
 15. [性能与已知上限](#15-性能与已知上限)
 16. [故障排查](#16-故障排查)
 17. [架构说明](#17-架构说明)
+18. [v1.3.0 部署与回归检查](#18-v130-部署与回归检查)
 
 ---
 
@@ -208,7 +209,8 @@ python -m platformio device monitor --port COM3 --baud 115200 --dtr 1 --rts 1
 
 ## 6. 首次启动：读取密码
 
-以 **115200** 波特率打开串口控制台。每次启动设备都会打印管理员凭据：
+以 **115200** 波特率打开串口控制台。每次启动设备都会打印管理员凭据。
+以下是旧版日志示例，不是 v1.3.0 实测；新驱动在帧完成或故障时打印状态：
 
 ```
 AdBlock EPD booting (reset=3 heap=144544 psram=2095103)
@@ -316,27 +318,32 @@ nslookup doubleclick.net 192.168.10.190
 | 卡片 | 作用 |
 |---|---|
 | 顶部磁贴 | 今日拦截、今日查询、拦截率、累计拦截、规则数量、free heap、RSSI、芯片温度 |
-| 每小时拦截 | 最近 24 h 被拦截查询的直方图 |
-| 域名排行榜 | 今日 Top 被拦截域名 |
+| 每小时拦截 | 今日 00–23 时直方图，跨日清零（不是滚动 24 h） |
+| 域名排行榜 | 今日 Space-Saving 近似 Top：计数上界 / 误差；真实计数位于二者差值到上界之间 |
 | 客户端 | 每个客户端的 IP/MAC、blocked/allowed、ban 切换 |
 | 自定义拦截域名 | 添加 / 删除指定域名 |
-| 规则更新 | 远程 blocklist URL + 自动更新间隔，或上传 `.bin` |
-| 设备 | uptime、Bloom filter、pending 查询、累计值、**立即刷新屏幕** |
-| 网络 | 修改 WiFi |
+| 规则更新 | URL、间隔、立即后台下载、CA 设置、字节进度、本地上传 |
+| 设备 | uptime、Bloom、pending、缓存、最大 loop 用时、面板 / OTA 状态、剩余容量 |
+| 网络 | 修改 WiFi、主 / 备 DNS 上游 IPv4 |
 | 管理员密码 | 修改 `admin` 密码 |
 
 **认证模型。** Web 控制台使用 Basic Auth（`admin` + 密码），页面每 5 s 拉取
-`/stats`。配置修改接口还检查它返回的 CSRF `token`；当前固件上传和列表上传
-接口检查 Basic Auth，未检查 CSRF token。AP 配网的 `/setwifi` 不要求认证。
+`/stats`。所有受保护的写接口还检查 CSRF `token`（128 bit，旧短 token 自动迁移）。
+固件 / 列表上传在 `START` 阶段就检查 URL 中的 token 或 `X-CSRF-Token`，
+不是写完才检查。AP 配网的 `/setwifi` 不要求认证。
 页面为局域网 HTTP 服务，应在可信局域网中使用；不要把管理端口映射到公网。
 
 ---
 
 ## 10. 电子纸仪表盘
 
-面板**每 3 分钟**做一次四色全刷（`DASH_REFRESH_MS`）。每次刷新端到端约 17 s，
-其中约 15 s 的面板 BUSY 等待在后台运行。帧渲染和传输仍同步占用主循环约 1–1.4 s，
-这段时间可能增加 DNS 延迟或丢包（见 [架构说明](#17-架构说明)）。
+面板**每 3 分钟**请求四色全刷（`DASH_REFRESH_MS`）。v1.3.0 将复位、上电、
+逐行发送、刷新、断电拆成状态机，每次服务最多发送两条完整行；每个 64 行分带
+仍同步绘制一次。每帧固定统计快照，防止不同分带的数据不一致。
+旧版端到端约 17 s / 面板刷新约 15 s 仅为历史参考；当前耗时须实测。
+阶段 BUSY 超时为 45 s、单次尝试整帧上限 120 s，失败退避 2 s 后最多再试两次；
+故障后保留错误信息，等待下次手动 / 周期请求。单个分带绘图、行发送和 flash 擦写
+仍有有限同步开销（见 [架构说明](#17-架构说明)）。
 
 显示内容：
 
@@ -392,8 +399,10 @@ python 3.98/merged-adblock-epd/tools/build_blocklist.py 3.98/merged-adblock-epd/
 
 默认列表需要联网，结果会随上游分支变化。格式兼容不代表任意列表都能装入：
 文件必须完整、含至少一条哈希，并且放得下 LittleFS；替换时还需同时容纳旧文件和新文件。
-构建器会跳过读取失败的输入，甚至可能生成空列表；使用前检查输出的来源错误、
-哈希数量和体积。远程更新 URL 必须返回 `CADB` 二进制，不能直接填 hosts / 域名文本 URL。
+构建器遇到任一来源读取失败、无有效域名或非法 Bloom 位数时退出并保留旧输出；
+成功后通过临时文件原子替换。非 2 次幂参数也采用与固件一致的 64 位中间计算。
+`--bloom-bits` 范围为 1..16,777,216；设备仍需足够 PSRAM，否则回退 flash 查找。
+远程更新 URL 必须返回 `CADB` 二进制，不能直接填 hosts / 域名文本 URL。
 
 ### 上传列表
 
@@ -406,12 +415,29 @@ python 3.98/merged-adblock-epd/tools/build_blocklist.py 3.98/merged-adblock-epd/
 上传和定时下载都会先写临时文件、检查 `CADB` 头和文件长度，再替换旧列表。
 传输中断、文件结构不符或 LittleFS 空间不足时，应保留原列表；更新期间 LittleFS
 需要同时容纳旧列表和新文件。结构检查不证明列表来源可信或哈希内容正确。
-定时下载仍为同步操作，网络慢时可能暂时影响 DNS。HTTPS 服务器需要设备信任其 CA；
-当前固件没有为列表下载配置 CA 时应使用 Web 控制台手动上传，不要跳过证书校验。
+远程下载在单个后台任务中执行；任务只写 `/blocklist.tmp`，关闭后由主循环安装。
+它与 OTA / 本地列表上传互斥，预留 8 KiB 文件系统余量，必须能与旧表共存。
+响应头和正文均有长度上界、5 s 无数据超时、120 s 传输期限；连接超时 5 s，
+TLS 握手另有 10 s 上限。支持 Content-Length、chunked 和连接关闭封帧，拒绝 gzip、
+自动跳转及矛盾响应头。取消为协作式，库内连接 / flash 写入仍受各自调用耗时约束。
+间隔为 0..720 小时，0 表示关闭；失败保留旧表，下次按配置间隔尝试，也可手动立即下载。
+
+**HTTPS 配置步骤：**
+1. 从站点运营方或可信 CA 官方渠道取得证书链所需 PEM CA，不把未经确认的证书当作可信根。
+2. 在「规则更新 → HTTPS CA 设置」粘贴并保存（64..8192 字节，先解析再原子保存到 `/blocklist-ca.pem`）。
+3. 确保已完成 NTP 对时，填写直接返回 `blocklist.bin` 的 HTTPS URL。
+4. 点击「立即下载远程规则」，检查进度及终态；站点证书更新时重新维护 CA。
+
+不使用 `setInsecure()`；未配置 CA / 未对时拒绝 HTTPS。HTTP 只宜用于可信本地来源，
+不能证明数据来源真实性。结构校验不检查排序或 Bloom 内容；使用已通过构建器测试的文件。
+本地上传仍由同步 WebServer 解析 multipart，慢客户端和 flash 写入可能暂停 DNS，
+不能把后台下载优化宣传成所有上传完全无阻塞。
 
 ### 自定义单个域名
 
 在 自定义拦截域名 卡片里添加。它们存于 `/custom.txt`，重启后保留。
+自定义规则独立匹配，不受主黑名单 Bloom 或主表为空的限制；仍逐级检查域名后缀。
+规则和封禁变更会清空 DNS 缓存；保存失败返回错误，不把未持久化结果说成成功。
 
 ---
 
@@ -509,10 +535,9 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 长按进入配网门户仍会断开当前 STA。仪表盘的 Top 10 每帧选取一次，不再为全部
 9 个分带重复选取。本节原有硬件跑分为改动前的参考，未重新采集。
 
-**面板刷新。** 一帧包含两种截然不同的耗时：传输比特约 1.4 s，之后**约 15 s**
-供面板移动色素。固件把两者拆开，让那 ~15 s 在后台运行；这就是为什么 `[EPD]`
-日志行里的 `refresh=` 字段是面板的**健康检查**（~15 s = 真刷新；几毫秒 =
-更新其实没被接受）。
+**面板刷新。** 历史比特传输约 1.4 s、面板移动色素约 15 s。v1.3.0 连传输也拆成完整行，
+不再一次发送整帧。驱动必须观察到刷新 BUSY，未观察到或超时会报故障；
+`refresh=` 只能佐证刷新发生，不能证明画面方向 / 内容正确。
 
 **为什么用 bit-bang SPI。** 曾短暂尝试硬件 SPI 外设，帧看似快了 ~35×，实际
 什么都没刷新——那 15 s 属于面板，不属于总线。因此**有意**保留 bit-bang。
@@ -534,7 +559,7 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 | 整个网络失去 DNS | 检查设备电源、WiFi 和地址保留；可临时切回公共 DNS 恢复网络，但这期间拦截会被绕过。 |
 | 中文显示成空白 / 缺字 | 运行 `node 3.98/merged-adblock-epd/tools/check_font.js`；缺字时按第 14 节重生成，检查预览。 |
 | 只有部分客户端没有拦截 | 检查 DHCP DNS、IPv6 DNS、系统私有 DNS、浏览器 DoH 和缓存。 |
-| HTTPS 规则下载失败 | 当前代码没有为 `WiFiClientSecure` 配置 CA；改用 Web 上传二进制，或自行配置并验证 CA。 |
+| HTTPS 规则下载失败 | 检查 PEM CA、NTP 对时、主机名和证书链；需要直接 200 响应，不支持跳转 / gzip。失败保留旧表。 |
 | 上传列表失败 | 必须是完整的 v1 `CADB` 文件；检查大小及 LittleFS 是否能同时容纳旧列表和新文件。 |
 | 编译依赖解压报路径过长 | 固定项目平台版本，并按第 3 节设置较短的 `PLATFORMIO_CORE_DIR`。 |
 
@@ -548,9 +573,8 @@ python 3.98/merged-adblock-epd/tools/make_release.py
 * **没有全帧缓冲。** 768×552 @ 2 bpp 为 105,984 字节；S2 标称 320 KiB RAM
   并非都可用作画布，内部堆还与 WiFi、网络栈共享。画面不整体物化：`epdSendFrame()` 一次渲染
   并流式发送**一个 64 行的 band**，写入 12,288 字节的静态缓冲。
-* **面板 BUSY 等待不占用 `loop()`。** 帧渲染和发送仍同步执行；一帧发完后 BUSY 拉低约 15 s，先让
-  `epdSendFrame()` 返回，由 `loop()` 驱动 `epdServiceRefresh()`，DNS 才能持续
-  应答。
+* **面板状态机不等待 BUSY。** `epdSendFrame()` 只提交，`epdServiceRefresh()` 每轮最多发两行；
+  一个分带渲染仍是同步短任务。保持完整字节 / 行的厂商时序，不声称所有循环零阻塞。
 * **两个相互抵消的旋转变换。** `drawTextColor()` / `fillRectColor()` 应用其一，
   `epdRowData()` 应用其二。只能通过 helper 绘制，**绝不要**直接索引 `colorBuf`。
 * **window 由数据行推导**，绝不用运行计数器——见 `epd_driver.cpp` 里的 `0x83`
@@ -560,6 +584,43 @@ python 3.98/merged-adblock-epd/tools/make_release.py
   不打日志。
 
 ---
+
+## 18. v1.3.0 部署与回归检查
+
+本版为待实机验收测试版，见[更新说明](docs/releases/v1.3.0.md)。已有设备建议只升级
+应用 `firmware.bin`，保留 LittleFS / NVS，不运行 `uploadfs`。上传时可填写发行附件
+`SHA256SUMS.txt` 中对应 **firmware.bin** 的 SHA-256；即使未填写摘要，也必须通过
+完整长度、ESP32-S2 头部和 ESP-IDF 应用镜像校验才激活。OTA 失败不重启；成功响应后
+延后重启。未启用未认证的 ArduinoOTA 服务，升级入口为 Web 或串口。
+升级中不要断电；镜像校验不是签名或防降级机制。
+
+**DNS 主备与缓存：** 主上游 2 s 未回应后改用备用，再等 2 s；最终失败返回 SERVFAIL。
+应答必须匹配来源 IP / 端口、事务 ID 与原问题。UDP 最多 32 个 pending；正文优先用
+PSRAM，失败降为内部内存 4 槽，完全分配失败返回失败响应。TCP 一次一个客户端 / 一个
+问题，仍通过独立 UDP 套接字访问上游；上游 TC 响应原样传回，不实现上游 TCP 重试。
+
+缓存固定 16 项，每项最多 512 字节，仅缓存单个标准 A / AAAA、IN 问题的正响应，
+且无 EDNS、TC、权威 / 附加节，资源记录只接受 A / AAAA / CNAME。
+NXDOMAIN、DNSSEC / EDNS 或其他情况不缓存；TTL 按经过时间逐条递减，驻留不超过
+最小 TTL 或 300 s。问题大小写、类型、class 和标志原样匹配。
+上游、规则、封禁及网络绑定变更时失效。先拦截再查缓存，不能用缓存绕过新自定义规则。
+不要配置本机、回环、多播地址，也不要把会“转发回本设备”的路由器设为上游。
+
+桌面回归（仓库根）：
+
+```bash
+python 3.98/merged-adblock-epd/tools/test_build_blocklist.py
+python 3.98/merged-adblock-epd/tools/test_regressions.py
+python 3.98/merged-adblock-epd/tools/test_make_release.py
+# 需要 g++ / clang++；也可 --compiler 指向 Zig 可执行文件
+python 3.98/merged-adblock-epd/tools/test_native.py
+node 3.98/merged-adblock-epd/tools/check_font.js
+python -m platformio run -d 3.98/merged-adblock-epd -e s2mini
+```
+
+C++ 测试编译固件共享算法与真实面板驱动，以模拟 GPIO / 时间验证状态和总线字节，
+不是另一份 Python 实现。测试不覆盖真实电气时序、无线网络 / TLS 握手及掉电行为。
+本轮实机结果留空，按[实机验收清单](docs/HARDWARE-TEST-CHECKLIST.md)记录。
 
 *问题或修复：请在
 [issue tracker](https://github.com/youkum/esp32s2-mini-epaper-adblock/issues) 提 issue。*

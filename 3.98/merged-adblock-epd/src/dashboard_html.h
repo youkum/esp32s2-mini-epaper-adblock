@@ -1,6 +1,5 @@
 #pragma once
-// The dashboard page lives in flash as a raw string.
-// Modern, self-contained (no external assets) and entirely in Chinese.
+// 控制台直接存放于 flash；中文、自包含，无外部资源。
 static const char PAGE[] PROGMEM = R"HTML(
 <!doctype html><html lang="zh-CN"><head>
 <meta charset="utf-8">
@@ -34,7 +33,7 @@ tbody tr:hover{background:var(--card2)}
 .n{text-align:right}
 .sub{color:var(--mut);font-size:11.5px}
 .axis{display:flex;justify-content:space-between;color:var(--mut);font-size:11px;padding:6px 2px 0;font-variant-numeric:tabular-nums}
-input,select,button{font:inherit;color:var(--tx);background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:9px 12px;outline:none;max-width:100%}
+input,select,button,textarea{font:inherit;color:var(--tx);background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:9px 12px;outline:none;max-width:100%}
 input:focus,select:focus{border-color:var(--ac)}
 input[type=file]{padding:7px 10px;font-size:12.5px;flex:1}
 button{cursor:pointer;white-space:nowrap}
@@ -66,14 +65,14 @@ button.primary:hover{filter:brightness(1.09)}
   <section class="stats" id="stats"></section>
 
   <section class="card">
-    <h2>每小时拦截 <small>最近 24 小时</small></h2>
+    <h2>每小时拦截 <small>今日 00–23 时</small></h2>
     <div id="chart"></div>
     <div class="axis"><span>00</span><span>06</span><span>12</span><span>18</span><span>23</span></div>
   </section>
 
   <div class="cols">
     <section class="card">
-      <h2>域名排行榜 <small>今日</small></h2>
+      <h2>域名排行榜 <small>今日近似计数，上界 / 误差</small></h2>
       <table id="top"></table>
     </section>
     <section class="card">
@@ -107,8 +106,13 @@ button.primary:hover{filter:brightness(1.09)}
         <button class="primary" onclick="saveUp()">保存</button>
       </div>
       <div id="upinfo"></div>
-      <div class="hint">远程地址需指向本固件格式的 .bin 规则文件；也可以直接上传本地文件。</div>
-      <form method="post" action="/blocklist-upload" enctype="multipart/form-data" class="row" style="margin-top:10px">
+      <button onclick="fetchNow()">立即下载远程规则</button>
+      <details><summary>HTTPS CA 设置</summary>
+        <textarea id="capem" rows="6" style="width:100%" placeholder="粘贴站点证书链对应的可信 PEM CA；最大 8192 字节"></textarea>
+        <button onclick="saveCA()">保存 CA</button>
+      </details>
+      <div class="hint">远程地址需指向本固件格式的 .bin 规则文件；也可以直接上传本地文件。HTTPS 必须配置可信 CA 并完成 NTP 对时；不跟随跳转。HTTP 不保证来源真实性。</div>
+      <form method="post" id="blform" action="/blocklist-upload" enctype="multipart/form-data" class="row" style="margin-top:10px">
         <input type="file" name="bl" accept=".bin">
         <button>上传规则</button>
       </form>
@@ -120,15 +124,19 @@ button.primary:hover{filter:brightness(1.09)}
         <button onclick="refreshScreen()">立即刷新屏幕</button>
       </div>
       <div class="hint">刷新一次约需 15 秒，期间屏幕会闪烁几秒。</div>
-      <form method="post" action="/update" enctype="multipart/form-data" class="row" style="margin-top:12px">
+      <form method="post" id="fwform" action="/update" enctype="multipart/form-data" class="row" style="margin-top:12px">
         <input type="file" name="fw" accept=".bin">
-        <button>升级固件</button>
+        <input id="fwsha" placeholder="可选：发行文件 SHA-256" maxlength="64"><button>升级固件</button>
       </form>
     </section>
   </div>
 
   <section class="card">
     <h2>网络</h2>
+    <div class="row" style="margin-bottom:12px">
+      <input id="dns1" placeholder="主上游 IPv4"><input id="dns2" placeholder="备用上游 IPv4">
+      <button onclick="saveDns()">保存 DNS 上游</button>
+    </div>
     <form id="wform" method="post" action="/setwifi" class="row">
       <input name="ssid" placeholder="WiFi 名称" required>
       <input name="pass" type="password" placeholder="WiFi 密码">
@@ -176,25 +184,26 @@ async function load(){
   $("chart").innerHTML='<svg viewBox="0 0 480 96" preserveAspectRatio="none" style="width:100%;height:96px;display:block">'+
     '<line x1="0" y1="95" x2="480" y2="95" stroke="#242e3c" stroke-width="1"/>'+bars+'</svg>';
   $("top").innerHTML='<thead><tr><th>#</th><th>域名</th><th class="n">次数</th></tr></thead><tbody>'+
-    (d.top.length?d.top.map(function(t,i){return '<tr><td class="mut">'+(i+1)+'</td><td>'+esc(t.d)+'</td><td class="n">'+t.n+'</td></tr>'}).join(""):
+    (d.top.length?d.top.map(function(t,i){return '<tr><td class="mut">'+(i+1)+'</td><td>'+esc(t.d)+'</td><td class="n">'+t.n+' / '+t.error+'</td></tr>'}).join(""):
      '<tr><td colspan="3" class="mut">暂无拦截记录</td></tr>')+'</tbody>';
   $("clients").innerHTML='<thead><tr><th>IP / MAC</th><th class="n">拦截</th><th class="n">放行</th><th></th></tr></thead><tbody>'+
     (d.clients.length?d.clients.map(function(c){return '<tr><td>'+esc(c.ip)+'<div class="sub">'+esc(c.mac)+'</div></td><td class="n">'+c.blocked+
       '</td><td class="n">'+c.allowed+'</td><td class="n"><button onclick="ban(\''+esc(c.ip)+'\')">'+(c.banned?"解禁":"拉黑")+'</button></td></tr>'}).join(""):
      '<tr><td colspan="4" class="mut">暂无客户端</td></tr>')+'</tbody>';
-  $("custom").innerHTML=d.custom.length?d.custom.map(function(x){return '<span class="chip">'+esc(x)+'<b onclick="unb(\''+esc(x)+'\')">×</b></span>'}).join(""):
+  $("custom").innerHTML=d.custom.length?d.custom.map(function(x){return '<span class="chip">'+esc(x)+'<b data-domain="'+esc(x)+'">×</b></span>'}).join(""):
     '<span class="mut">暂无自定义规则</span>';
-  $("dev").innerHTML=kv("运行时间",d.uptime)+kv("布隆过滤器",d.bloom)+kv("待处理查询",d.pending)+
+  document.querySelectorAll("b[data-domain]").forEach(function(b){b.addEventListener("click",function(){unb(b.dataset.domain)})});
+  $("dev").innerHTML=kv("运行时间",d.uptime)+kv("面板状态",esc(d.panel)+"（"+d.panelRows+"/552）")+kv("面板错误",esc(d.panelError))+kv("面板故障次数",d.panelFaults)+kv("缓存命中 / 未命中",d.cacheHits+" / "+d.cacheMisses)+kv("上游重试 / 超时",d.dnsRetries+" / "+d.dnsTimeouts)+kv("拒绝异常包",d.dnsRejected)+kv("最大 loop 用时",(d.maxLoopUs/1000).toFixed(1)+" ms")+kv("OTA 状态",esc(d.otaStatus))+kv("OTA 分区容量",fmt(d.otaCapacity)+" 字节")+kv("文件系统剩余",fmt(d.fsFree)+" 字节")+kv("布隆过滤器",d.bloom)+kv("待处理查询",d.pending)+
     kv("累计查询",fmt(d.allowed+d.blocked))+kv("累计放行",fmt(d.allowed))+kv("设备地址",d.ip);
-  $("upinfo").innerHTML=kv("最近更新",esc(d.upstat))+
+  $("upinfo").innerHTML=kv("最近更新",esc(d.upstat))+kv("下载 / 上传进度",fmt(d.updateBytes)+" / "+(d.updateTotal?fmt(d.updateTotal):"未知")+" 字节")+kv("HTTPS CA",d.caConfigured?"已配置":"未配置")+
     kv("自动更新",(d.upiv>0?'<span class="tag ok">每 '+d.upiv+' 小时</span>':'<span class="tag off">已关闭</span>'));
-  if(!upInit){ $("upurl").value=d.upurl||""; $("upiv").value=String(d.upiv); upInit=true; }
+  if(!upInit){ $("upurl").value=d.upurl||""; $("upiv").value=String(d.upiv); $("dns1").value=d.dnsPrimary; $("dns2").value=d.dnsSecondary; upInit=true; }
   $("wform").action="/setwifi?token="+encodeURIComponent(TK);
 }
 async function ban(ip){ await fetch("/ban?token="+TK+"&ip="+encodeURIComponent(ip)); toast("已更新"); load() }
-async function addB(){ var d=$("d2").value.trim(); if(!d) return; await fetch("/addblock?token="+TK+"&d="+encodeURIComponent(d)); $("d2").value=""; toast("已添加 "+d); load() }
-async function unb(d){ await fetch("/unblock?token="+TK+"&d="+encodeURIComponent(d)); toast("已移除"); load() }
-async function saveUp(){ await fetch("/setupdate?token="+TK+"&url="+encodeURIComponent($("upurl").value.trim())+"&iv="+$("upiv").value); toast("已保存"); load() }
+async function addB(){ var d=$("d2").value.trim(); if(!d) return; var r=await fetch("/addblock?token="+TK+"&d="+encodeURIComponent(d)); if(r.ok)$("d2").value=""; toast(await r.text()); load() }
+async function unb(d){ var r=await fetch("/unblock?token="+TK+"&d="+encodeURIComponent(d)); toast(await r.text()); load() }
+async function saveUp(){ var r=await fetch("/setupdate?token="+TK+"&url="+encodeURIComponent($("upurl").value.trim())+"&iv="+$("upiv").value); toast(await r.text()); load() }
 async function refreshScreen(){ var r=await fetch("/refresh-screen?token="+TK); toast(r.ok?"已请求刷新屏幕":"未能请求刷新屏幕"); }
 async function setPass(){
   var a=$("np1").value,b=$("np2").value;
@@ -206,6 +215,30 @@ async function setPass(){
   var map={length:"密码长度需为 6-64 位",charset:"密码只能使用可见 ASCII 字符且不含空格",same:"新密码与当前密码相同","bad token":"会话已过期，请刷新页面"};
   toast(map[msg]||"修改失败");
 }
+async function postAction(path,body){
+  var r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded","X-CSRF-Token":TK},body:body||""});
+  toast(await r.text()); load();
+}
+async function saveCA(){await postAction("/setca","pem="+encodeURIComponent($("capem").value));}
+async function fetchNow(){await postAction("/fetch-now");}
+async function saveDns(){await postAction("/setdns","primary="+encodeURIComponent($("dns1").value)+"&secondary="+encodeURIComponent($("dns2").value));}
+function bindUpload(formId,path){
+  $(formId).addEventListener("submit",function(e){
+    e.preventDefault(); if(!TK){toast("请先刷新页面完成登录");return;}
+    var form=e.currentTarget,file=form.querySelector('input[type=file]').files[0];
+    if(!file){toast("请选择文件");return;}
+    var sha=formId==="fwform"?$("fwsha").value.trim():"";
+    if(sha && !/^[a-fA-F0-9]{64}$/.test(sha)){toast("SHA-256 格式无效");return;}
+    var xhr=new XMLHttpRequest(),button=form.querySelector("button"); button.disabled=true;
+    xhr.open("POST",path+"?token="+encodeURIComponent(TK)+"&size="+file.size+"&sha256="+encodeURIComponent(sha));
+    xhr.setRequestHeader("X-CSRF-Token",TK);
+    xhr.upload.onprogress=function(ev){button.textContent=ev.lengthComputable?"上传 "+Math.round(ev.loaded*100/ev.total)+"%":"上传中";};
+    xhr.onload=function(){button.disabled=false;button.textContent=formId==="fwform"?"升级固件":"上传规则";toast(xhr.responseText||"请求失败");load();};
+    xhr.onerror=function(){button.disabled=false;button.textContent=formId==="fwform"?"升级固件":"上传规则";toast("连接中断，请刷新检查更新状态");};
+    xhr.send(new FormData(form));
+  });
+}
+bindUpload("fwform","/update"); bindUpload("blform","/blocklist-upload");
 load(); setInterval(load,5000);
 </script></body></html>
 )HTML";

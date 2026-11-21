@@ -1,5 +1,69 @@
 # 构建验证记录
 
+## v1.3.0 当前记录（2026-11-21，北京时间）
+
+目标：ESP32-S2 mini / S2FNR2，4 MB flash、2 MB PSRAM。本版为待实机验收测试版。
+对应源码见 GitHub tag `v1.3.0`，精确提交写入同版 release-metadata.json。
+本轮未连接硬件，不填写无线性能、面板照片或 OTA 实机验收结果。
+
+### 固件编译
+
+PlatformIO Core 6.2.0，平台 espressif32@6.12.0，Arduino-ESP32 2.0.17 / S2 SDK 4.4.7，
+Xtensa 8.4.0+2021r2-patch5，esptool 4.9.0，mklittlefs 包 1.203.210628。
+运行环境 Windows / Python 3.14.7；继续使用独立 PLATFORMIO_CORE_DIR。
+不声称跨机器或跨构建日期字节一致。编译、buildfs、合成均通过。
+
+内部静态 RAM：**95,852 / 327,680（29.3%）**；应用 Flash：**1,030,386 / 1,179,648（87.3%）**。
+
+未改变分区：两个 1.125 MiB OTA slot，1.625 MiB LittleFS。没有全帧缓冲，
+像素仍只用 12,288 字节 band。新 pending 正文优先 PSRAM，失败降为内部 4 槽。
+静态 RAM 不是运行期最小 free heap；下载任务 / TLS 峰值需实机测量。
+
+### 算法与脚本回归
+
+- C++ 原生回归：**33,195 个断言**通过，Zig 0.14.1 的 C++ 前端，显式 -UNDEBUG。
+  直接编译共享 TopN / Bloom / DNS / HTTP 核心和真实 epd_driver.cpp。
+  覆盖新热点替换、长域名、32,000 组 Bloom 位点、TTL 递减 / 到期 / 回绕 / 容量、
+  CNAME 链、异常 DNS、HTTP 封帧 / 截断 / gzip / 跳转 / 空间不足、行窗及像素字节、
+  初始化 / 刷新 / 断电 BUSY 卡死、未观察到 BUSY、整帧超时和有限重试。
+- 原有构建器：33 项通过；失败保护回归：3 个测试方法（含 6 个失败场景）通过。
+- 打包脚本：5 个 unittest 通过。
+- 字形：45 字，0 缺字；未更换字体或声称再分发依据完备。
+- 控制台 JavaScript 语法、工作流 YAML 解析、git diff --check 通过。
+- 原生测试不能验证真实 GPIO 电气时序、TLS 握手、Web multipart 与 ESP-IDF OTA / 掉电行为。
+
+### 镜像与部署检查
+
+应用、分区表和 LittleFS 在合成镜像中的对应区段逐字节一致。
+LittleFS 按实际 4096 / 256 / 1,703,936 参数解包，唯一 blocklist.bin 与输入逐字节一致；
+应用 esptool image_info 的 checksum 和 validation hash 有效。
+烧写辅助脚本通过 Windows PowerShell 5.1 语法检查。
+指南核对了首次烧写、保留配置的 app 升级、Web OTA 文件选择、CA / 上游设置与恢复路径。
+新增实机串行 DNS 探针，--help 已检查，本轮没有向真实设备发送查询。
+
+|产物|字节|SHA-256|
+|---|---:|---|
+|`firmware.bin`|1,030,752|`bd97df61902171257605c35be2b3a154c9f004d5dbafbd80a495203dc7a591e6`|
+|`littlefs.bin`|1,703,936|`69a29cb41a0ba682292cc872b4ad58b6ac3e74f6cff5fc88a26409142390f139`|
+|`firmware-merged.bin`|4,128,768|`48efc1924331bd5a005be4ba54655dbe2a57aaa0362e473abdd6b6b822ee2622`|
+|`blocklist.bin`|647,922|`1591fe4d1c0f08f62c2de52fed50c640364eae6e670faaf0a40fc20b6e6774d0`|
+
+### 开源引用检查
+
+未引入新的第三方固件库；OTA / TLS / CA / SHA-256 使用 SDK 已有组件。
+新增算法 / 协议参考和仅用于本机测试的 Zig 范围说明。文档包沿用主要上游许可全文。
+旧黑名单输入快照与 SimHei 点阵的再分发依据仍待补，不能把编译 / 发布当作许可完备证明。
+
+### 实机待办
+
+见 [HARDWARE-TEST-CHECKLIST.md](HARDWARE-TEST-CHECKLIST.md)，全部结果标待测。
+特别验证新行间间隔、下载 / 刷新并发 DNS、WiFi 断线重绑、证书失败、OTA 失败不重启及长跑。
+
+---
+
+## v1.2.0 历史记录
+
+
 验证日期：2026-11-19（北京时间）。目标：`s2mini`，ESP32-S2 mini / 4 MB flash / 2 MB PSRAM。
 固件源码基线为 `b2daa32eb3cbe3d1dce43744266e34c20b7d8976`；
 `ea1cace3319cc88014f7df265f0e10d3e22da500` 将平台固定为 `espressif32@6.12.0`，

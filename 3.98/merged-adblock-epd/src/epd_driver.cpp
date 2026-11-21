@@ -36,28 +36,6 @@ static void epdSendData(uint8_t data) {
   digitalWrite(PIN_EPD_CS, HIGH);
 }
 
-// 这块面板的 BUSY 为低电平有效：低电平表示仍在工作。整次刷新会把它
-// 拉低约 15 s，因此这段等待的时长本身也是最廉价的佐证，证明面板
-// 确实在执行刷新。
-static void epdWaitBusy(unsigned long maxMs) {
-  unsigned long t0 = millis();
-  unsigned long timeoutMs = maxMs > 0 ? maxMs : 45000;
-  while (digitalRead(PIN_EPD_BUSY) == LOW) {
-    delay(10);
-    if (millis() - t0 > timeoutMs) {
-      Serial.println("[EPD] busy TIMEOUT!");
-      return;
-    }
-  }
-}
-static void epdWaitBusy() { epdWaitBusy(0); }
-
-static void epdReset() {
-  delay(20);
-  digitalWrite(PIN_EPD_RST, LOW);  delay(40);
-  digitalWrite(PIN_EPD_RST, HIGH); delay(50);
-}
-
 void gpioInit() {
   pinMode(PIN_EPD_BUSY, INPUT);
   pinMode(PIN_EPD_RST,  OUTPUT);
@@ -69,25 +47,6 @@ void gpioInit() {
   digitalWrite(PIN_EPD_RST, HIGH);
   digitalWrite(PIN_EPD_CS,  HIGH);
   digitalWrite(PIN_EPD_SCK, LOW);
-}
-
-// 从面板厂商的 epd7in3g-A0.cpp Init() 移植并精简的初始化序列。
-void epdInit() {
-  epdReset();
-  epdWaitBusy();
-  delay(30);
-
-  epdSendCommand(0x00);
-  epdSendData(0x0B);
-
-  epdSendCommand(0x61);
-  epdSendData(W / 256);
-  epdSendData(W % 256);
-  epdSendData(H / 256);
-  epdSendData(H % 256);
-
-  epdSendCommand(0x04);
-  epdWaitBusy();
 }
 
 // ── 分带传输 ─────────────────────────────────────────────────
@@ -146,94 +105,115 @@ static void epdRestoreFullWindow() {
   epdSendData(0x01);
 }
 
-// epdSendFrame() 与 epdServiceRefresh() 之间半成品帧的状态。
-static bool     s_refreshing  = false;
-static uint32_t s_frameStartMs = 0;
-static uint32_t s_armedMs      = 0;
-static uint32_t s_rowsDoneMs   = 0;
-static uint32_t s_streamMs     = 0;
-
-// 不套重试循环：在这块面板上，厂商驱动的循环第一次迭代即返回，
-// 没有什么可重试的。
-//
-// 一直执行到 0x12 刷新命令（含）为止，然后立即返回。面板接下来用
-// 约 15 s 刷新玻璃，我们则回到网络事务中。
-uint32_t epdSendFrame(void (*renderBand)(int rBase, int rows, uint8_t* buf)) {
-  // epdInit() 会复位并重新给面板上电，上一帧仍在刷新期间绝不能这么做。
-  if (s_refreshing) epdWaitRefresh();
-
-  const int bytesPerRow = W / 4;
-  uint32_t t0 = millis();
-
-  epdInit();
-  epdSendCommand(0x04);
-  epdWaitBusy();
-  uint32_t tArmed = millis();
-
-  for (int rBase = 0; rBase < H; rBase += EPD_CHUNK_ROWS) {
-    int rows = EPD_CHUNK_ROWS;
-    if (rBase + rows > H) rows = H - rBase;
-
-    renderBand(rBase, rows, s_bandBuf);
-
-    for (int k = 0; k < rows; k++) {
-      // 缓冲区行 d = rBase + k。这是厂商的映射关系，已逐窗口对照
-      // 其原始循环核实：数据行 0..H/2-1 落入奇数窗口（2d+1，递增），
-      // 行 H/2..H-1 落入偶数窗口（2(H-1-d)，递减）。这两半并不是
-      // 面板上连续的分区——面板把它们交错排布——因此窗口必须由
-      // 数据行计算得出，而不能用递增计数器。
-      int d = rBase + k;
-      int p = (d < H / 2) ? (2 * d + 1) : (2 * (H - 1 - d));
-      epdRowWindow(p);
-      epdRowData(s_bandBuf + (size_t)k * bytesPerRow);
-    }
-  }
-
-  uint32_t tRows = millis();
-  epdRestoreFullWindow();
-
-  epdSendCommand(0x12);
-  epdSendData(0x00);
-
-  s_frameStartMs = t0;
-  s_armedMs      = tArmed - t0;
-  s_rowsDoneMs   = tRows - t0;
-  s_streamMs     = millis() - t0;
-  s_refreshing   = true;
-  return s_streamMs;
+// 每次只发送两条完整行；复位、上电、刷新与断电等待均用状态机服务。
+// 单个字节与单行内部的 bit-bang 时序保持原样，不能拆到半个字节。
+enum class Phase { Idle, ResetWait, ResetLow, ResetHigh, ResetBusy, InitDelay,
+                   PowerBusy, PowerAgain, Stream, Refresh, Off, Retry, Failed };
+static Phase phase = Phase::Idle;
+static void (*renderer)(int, int, uint8_t*) = nullptr;
+static uint32_t phaseMs = 0, frameMs = 0, refreshMs = 0;
+static uint32_t faults = 0;
+static uint8_t retries = 0;
+static int rowDone = 0;
+static bool sawBusy = false;
+static const char* lastError = "无";
+static void enter(Phase p) { phase = p; phaseMs = millis(); }
+static void fail(const char* reason) {
+  lastError = reason; ++faults;
+  digitalWrite(PIN_EPD_CS, HIGH);
+  Serial.printf("[EPD] %s，重试 %u/2\n", reason, unsigned(retries));
+  if (retries < 2) { ++retries; enter(Phase::Retry); }
+  else { renderer = nullptr; enter(Phase::Failed); }
 }
-
-bool epdRefreshActive() { return s_refreshing; }
-
-bool epdServiceRefresh() {
-  if (!s_refreshing) return true;
-  if (digitalRead(PIN_EPD_BUSY) == LOW) return false;   // 玻璃仍在刷新中
-
-  uint32_t tWait = millis();
-  epdSendCommand(0x02);
-  epdSendData(0x00);
-  epdWaitBusy();
-  uint32_t tOff = millis();
-
-  // 面板自身的 busy 时长才是它确实刷新了玻璃的唯一可信证明：此处应
-  // 约为 15 s；若只有几十毫秒，则视为「更新命令根本未被接受」。
-  Serial.printf("[EPD] arm=%lu rows=%lu stream=%lu refresh=%lu off=%lu total=%lu ms",
-                s_armedMs, s_rowsDoneMs - s_armedMs, s_streamMs,
-                tWait - (s_frameStartMs + s_streamMs), tOff - tWait,
-                tOff - s_frameStartMs);
-  Serial.println();
-
-  s_refreshing = false;
+bool epdSendFrame(void (*renderBand)(int, int, uint8_t*)) {
+  if (!renderBand || epdRefreshActive()) return false;
+  renderer = renderBand; retries = 0; rowDone = 0; lastError = "无";
+  frameMs = millis(); enter(Phase::ResetWait);
   return true;
 }
-
-void epdWaitRefresh() {
-  while (!epdServiceRefresh()) delay(10);
+bool epdRefreshActive() { return phase != Phase::Idle && phase != Phase::Failed; }
+const char* epdStatus() {
+  switch (phase) {
+    case Phase::Idle: return "空闲";
+    case Phase::Failed: return "故障，等待下次请求";
+    case Phase::Retry: return "恢复重试";
+    case Phase::Stream: return "分行发送";
+    case Phase::Refresh: return "面板刷新";
+    case Phase::Off: return "等待断电";
+    default: return "初始化";
+  }
 }
-
-// 深度休眠：0x07 命令 + 0xA5 校验码，随后延时确保命令生效。
-void epdSleep() {
-  epdSendCommand(0x07);
-  epdSendData(0xA5);
-  delay(200);
+const char* epdError() { return lastError; }
+uint32_t epdFaults() { return faults; }
+int epdRowsSent() { return rowDone; }
+bool epdServiceRefresh() {
+  if (!epdRefreshActive()) return true;
+  uint32_t now = millis(), elapsed = now - phaseMs;
+  if (phase != Phase::Retry && now - frameMs >= 120000) {
+    fail("整帧超时"); return !epdRefreshActive();
+  }
+  bool busy = digitalRead(PIN_EPD_BUSY) == LOW;
+  switch (phase) {
+    case Phase::ResetWait:
+      if (elapsed >= 20) { digitalWrite(PIN_EPD_RST, LOW); enter(Phase::ResetLow); } break;
+    case Phase::ResetLow:
+      if (elapsed >= 40) { digitalWrite(PIN_EPD_RST, HIGH); enter(Phase::ResetHigh); } break;
+    case Phase::ResetHigh:
+      if (elapsed >= 50) enter(Phase::ResetBusy);
+      break;
+    case Phase::ResetBusy:
+      if (!busy) enter(Phase::InitDelay);
+      else if (elapsed >= 45000) fail("复位 BUSY 超时");
+      break;
+    case Phase::InitDelay:
+      if (elapsed >= 30) {
+        epdSendCommand(0x00); epdSendData(0x0B);
+        epdSendCommand(0x61); epdSendData(W/256); epdSendData(W%256);
+        epdSendData(H/256); epdSendData(H%256);
+        epdSendCommand(0x04); enter(Phase::PowerBusy);
+      } break;
+    case Phase::PowerBusy:
+      if (elapsed < 10) break;
+      if (!busy) { epdSendCommand(0x04); enter(Phase::PowerAgain); }
+      else if (elapsed >= 45000) fail("上电 BUSY 超时");
+      break;
+    case Phase::PowerAgain:
+      if (elapsed < 10) break;
+      if (!busy) { rowDone = 0; enter(Phase::Stream); }
+      else if (elapsed >= 45000) fail("二次上电 BUSY 超时");
+      break;
+    case Phase::Stream:
+      for (int n=0; n<2 && rowDone<H; ++n) {
+        int base = rowDone / EPD_CHUNK_ROWS * EPD_CHUNK_ROWS;
+        if (rowDone == base) renderer(base, min(EPD_CHUNK_ROWS, H-base), s_bandBuf);
+        int window = rowDone < H/2 ? 2*rowDone+1 : 2*(H-1-rowDone);
+        epdRowWindow(window);
+        epdRowData(s_bandBuf + size_t(rowDone-base)*(W/4));
+        ++rowDone;
+      }
+      if (rowDone == H) {
+        epdRestoreFullWindow(); epdSendCommand(0x12); epdSendData(0x00);
+        sawBusy = false; refreshMs = millis(); enter(Phase::Refresh);
+      } break;
+    case Phase::Refresh:
+      if (busy) sawBusy = true;
+      if (!busy && sawBusy) {
+        epdSendCommand(0x02); epdSendData(0x00); enter(Phase::Off);
+      } else if (!sawBusy && elapsed >= 2000) fail("刷新未观察到 BUSY");
+      else if (elapsed >= 45000) fail("刷新 BUSY 超时");
+      break;
+    case Phase::Off:
+      if (elapsed < 10) break;
+      if (!busy) {
+        Serial.printf("[EPD] refresh=%lu total=%lu ms，帧完成\n",
+                      static_cast<unsigned long>(phaseMs-refreshMs),
+                      static_cast<unsigned long>(now-frameMs));
+        renderer = nullptr; lastError="无"; enter(Phase::Idle);
+      } else if (elapsed >= 45000) fail("断电 BUSY 超时");
+      break;
+    case Phase::Retry:
+      if (elapsed >= 2000) { frameMs = now; rowDone=0; enter(Phase::ResetWait); } break;
+    default: break;
+  }
+  return !epdRefreshActive();
 }

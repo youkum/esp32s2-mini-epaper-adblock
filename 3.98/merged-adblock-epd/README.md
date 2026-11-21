@@ -52,15 +52,16 @@ python tools/build_blocklist.py data/blocklist.bin
 Bloom 预过滤）与上游 v1 格式兼容，导入还受文件长度、非空和空间限制。
 已有设备优先经 Web 控制台上传列表，保留其他配置；首次部署可以 `uploadfs`。
 默认重建会联网下载 StevenBlack + HaGeZi；许可、旧二进制出处与字体待核对项见
-[第三方声明](../../THIRD-PARTY-NOTICES.md)。远程 HTTPS 下载当前没有配置 CA，使用说明见根目录指南。
+[第三方声明](../../THIRD-PARTY-NOTICES.md)。HTTPS 在控制台配置可信 PEM CA 并完成 NTP
+对时后使用；后台下载 / 主备 DNS / 缓存说明见根目录指南第 18 节。
 
 ## 关键工程约束（摘录）
 
 * **没有全帧缓冲**：768×552 @ 2 bpp 约 106 KB，放不进与 WiFi 共享的内部
   DRAM；画面按 **64 行 band** 流式渲染进 12,288 字节静态缓冲。
-* **面板 BUSY 等待在后台执行**：帧渲染和传输仍同步占用主循环，历史约 1–1.4 s；其后面板刷新约 15 s 由
-  `epdServiceRefresh()` 在后台完成；`[EPD]` 日志行的 `refresh=` 字段是面板
-  健康检查（~15 s = 真刷新，几毫秒 = 更新未被接受）。
+* **面板全过程状态机**：复位、上电、每次两行发送、刷新、断电均由
+  `epdServiceRefresh()` 驱动。阶段 BUSY 45 s / 单次整帧 120 s 上限，失败最多再试两次。
+  每帧固定数据快照，仍只保留一个 64 行静态像素分带。
 * **只用 `drawTextColor()` / `fillRectColor()` 绘制**，每行的 `0x83` window
   必须由其**数据行**推导，绝不用运行计数器。
 * **UDP DNS 有约 6 个数据报的 burst ceiling**（lwIP 预编译库的
@@ -69,3 +70,17 @@ Bloom 预过滤）与上游 v1 格式兼容，导入还受文件长度、非空�
 完整规则与实测推理见 [`AGENTS.md`](AGENTS.md)，通俗版见
 [详细指南的架构说明](../../GUIDE.md#17-架构说明)与
 [性能与已知上限](../../GUIDE.md#15-性能与已知上限)。
+
+## v1.3.0 回归入口
+
+```bash
+python tools/test_native.py
+python tools/test_regressions.py
+python tools/test_build_blocklist.py
+python tools/test_make_release.py
+node tools/check_font.js
+```
+
+原生测试需 g++ / clang++，或 `--compiler C:/工具路径/zig.exe`。测试显式开启断言，
+不能用 `NDEBUG` 空断言制造通过。新状态、配置及接口见根目录指南第 18 节，
+实机待办见[验收清单](../../docs/HARDWARE-TEST-CHECKLIST.md)。

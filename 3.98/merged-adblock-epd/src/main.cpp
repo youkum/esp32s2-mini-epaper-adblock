@@ -17,10 +17,12 @@
 #include <LittleFS.h>
 #include <ESPmDNS.h>
 #include <WebServer.h>
-#include <Update.h>
-#include <HTTPClient.h>
 #include <WiFiClientSecure.h>
-#include <ArduinoOTA.h>
+#include <atomic>
+#include "esp_ota_ops.h"
+#include "esp_image_format.h"
+#include "mbedtls/sha256.h"
+#include "mbedtls/x509_crt.h"
 #include <time.h>
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
@@ -33,11 +35,16 @@
 #include "dashboard.h"
 #include "epd_driver.h"
 #include "tracker.h"
+#include "bloom_hash.h"
+#include "dns_cache.h"
+#include "http_reader.h"
 #include "secrets.h"
 #include "dashboard_html.h"
 
 // ---- 配置 ----
-static const IPAddress UPSTREAM(9, 9, 9, 9);
+static IPAddress dnsPrimary(9,9,9,9), dnsSecondary(1,1,1,1);
+static DnsCache dnsCache;
+static uint32_t dnsRetries=0, dnsTimeouts=0, dnsRejected=0;
 static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
 static const char* BLOCKLIST_TMP = "/blocklist.tmp";
@@ -50,7 +57,7 @@ static const int MAX_CUSTOM = 200;
 static const int MAX_BAN = 32;
 static const uint32_t UPSTREAM_TIMEOUT_MS = 2000;
 static const uint32_t REMOTE_FETCH_IDLE_MS = 3000;
-static const char* DASHBOARD_ETAG = "adblk-console-v4";
+static const char* DASHBOARD_ETAG = "adblk-console-v5";
 
 // ---- 日志 ----
 #ifdef NDEBUG
@@ -69,12 +76,23 @@ uint8_t* colorBuf = nullptr;
 
 // ---- 前向声明 ----
 WebServer web(80);
-static const char* COLLECTED_HEADERS[] = {"Authorization", "If-None-Match", "Origin", "Referer"};
+static const char* COLLECTED_HEADERS[] = {"Authorization", "If-None-Match", "Origin", "Referer", "X-CSRF-Token"};
 String updateUrl, updateStatus = "never";
-#define DASH_SETSTATUS(s) do { updateStatus = (s); } while (0)
-uint32_t updateIntervalH = 24, lastCheckMs = 0;
+uint32_t updateIntervalH = 24;
 static uint32_t lastDnsActivityMs = 0;
 static bool fetchBlocklist(String url);
+static uint32_t restartAt=0, maxLoopUs=0;
+enum class UpdateOwner { None, Remote, Rules, Firmware };
+static UpdateOwner updateOwner=UpdateOwner::None;
+static std::atomic<uint32_t> transferBytes{0}, transferTotal{0};
+static std::atomic<bool> cancelDownload{false};
+static QueueHandle_t downloadQueue=nullptr;
+struct DownloadResult { bool staged; char message[128]; };
+static uint32_t transferStarted=0;
+static const char* CA_PATH="/blocklist-ca.pem";
+static String otaStatus="未开始";
+static uint32_t otaBytes=0, otaExpected=0;
+
 
 // 在 setup() 中一次性捕获；随心跳上报，这样无需接 UART 探针就能把
 // 自发重启与 flash/OTA 复位区分开来。
@@ -116,11 +134,8 @@ uint8_t bloomK = 0;
 
 static bool bloomMayContain(uint64_t h64) {
   if (!bloomFilter || bloomBits == 0 || bloomK == 0) return true;
-  uint32_t h1 = (uint32_t)(h64 & 0xFFFFFFFF);
-  uint32_t h2 = (uint32_t)(h64 >> 32);
-  if (h2 == 0) h2 = 0xFFFFFFFF;
   for (uint8_t i = 0; i < bloomK; i++) {
-    uint32_t pos = (h1 + i * h2) % bloomBits;
+    uint32_t pos = bloomPosition(h64, bloomBits, i);
     if (!(bloomFilter[pos >> 3] & (1 << (pos & 7)))) return false;
   }
   return true;
@@ -174,7 +189,7 @@ static bool isBlocked(const char* domain, size_t dlen) {
     uint64_t h64 = fnv64(p, remaining);
     uint64_t h40 = h64 & HASH_MASK;
     bool checkFlash = bloomMayContain(h64);
-    if (checkFlash && (inFlash(h40) || inCustom(h40))) return true;
+    if (inCustom(h40) || (checkFlash && inFlash(h40))) return true;
     const char* dot = (const char*)memchr(p, '.', remaining);
     if (!dot) break;
     size_t consumed = (size_t)(dot - p) + 1;
@@ -184,14 +199,33 @@ static bool isBlocked(const char* domain, size_t dlen) {
   }
   return false;
 }
+// 配置文件先写同目录临时文件，再原子替换；校验失败不截断旧配置。
+static bool writeConfig(const char* path,const String& text) {
+  String staged=String(path)+".tmp";
+  File f=LittleFS.open(staged,"w");
+  bool ok=f && f.print(text)==text.length();
+  if(f) { f.flush(); f.close(); }
+  ok=ok && LittleFS.rename(staged,path);
+  if(!ok) LittleFS.remove(staged);
+  return ok;
+}
 // ---- 持久化：自定义域名 ----
+static bool validCustomDomain(const String& d) {
+  if(d.length()<3 || d.length()>253 || d.indexOf('.')<1) return false;
+  size_t label=0;
+  for(unsigned char ch:d) {
+    if(ch=='.') { if(!label || label>63) return false; label=0; }
+    else { if(!isalnum(ch) || ch>=128) { if(ch!='-' && ch!='_') return false; } ++label; }
+  }
+  return label>0 && label<=63;
+}
 static void loadCustom() {
   numCustom = 0;
   File f = LittleFS.open("/custom.txt", "r");
   if (!f) return;
   while (f.available() && numCustom < MAX_CUSTOM) {
     String l = f.readStringUntil('\n'); l.trim(); l.toLowerCase();
-    if (l.length() && l.indexOf('.') > 0) {
+    if (validCustomDomain(l)) {
       customDom[numCustom] = l;
       customHash[numCustom] = fnv40(l.c_str(), l.length());
       numCustom++;
@@ -200,33 +234,36 @@ static void loadCustom() {
   f.close();
   sortCustom();
 }
-static void saveCustom() {
-  File f = LittleFS.open("/custom.txt", "w");
-  if (!f) return;
-  for (int i = 0; i < numCustom; i++) f.println(customDom[i]);
-  f.close();
+static bool saveCustom() {
+  String text;
+  for(int i=0;i<numCustom;++i) text+=customDom[i]+"\n";
+  return writeConfig("/custom.txt",text);
 }
 static bool addCustom(String d) {
   d.trim(); d.toLowerCase();
   if (d.startsWith("www.")) d = d.substring(4);
-  if (!d.length() || d.indexOf('.') < 0 || numCustom >= MAX_CUSTOM) return false;
+  if(d.endsWith(".")) d.remove(d.length()-1);
+  if (!validCustomDomain(d) || numCustom >= MAX_CUSTOM) return false;
   for (int i = 0; i < numCustom; i++) if (customDom[i] == d) return false;
   customDom[numCustom] = d;
   customHash[numCustom] = fnv40(d.c_str(), d.length());
   numCustom++;
   sortCustom();
-  saveCustom();
+  dnsCache.clear();
+  if(!saveCustom()) { loadCustom(); return false; }
   return true;
 }
-static void removeCustom(String d) {
+static bool removeCustom(String d) {
   d.toLowerCase();
   if (d.startsWith("www.")) d = d.substring(4);
   for (int i = 0; i < numCustom; i++) if (customDom[i] == d) {
     for (int j = i; j < numCustom - 1; j++) { customDom[j] = customDom[j+1]; customHash[j] = customHash[j+1]; }
     numCustom--;
-    saveCustom();
-    return;
+    dnsCache.clear();
+    if(!saveCustom()) { loadCustom(); return false; }
+    return true;
   }
+  return false;
 }
 
 // ---- 已封禁 IP ----
@@ -256,11 +293,10 @@ static void loadBanned() {
   }
   f.close();
 }
-static void saveBanned() {
-  File f = LittleFS.open("/banned.txt", "w");
-  if (!f) return;
-  for (int i = 0; i < numBanned; i++) { IPAddress ip(bannedIP[i]); f.println(ip.toString()); }
-  f.close();
+static bool saveBanned() {
+  String text;
+  for(int i=0;i<numBanned;++i) text+=IPAddress(bannedIP[i]).toString()+"\n";
+  return writeConfig("/banned.txt",text);
 }
 
 // ---- 客户端表 ----
@@ -296,13 +332,13 @@ static Dev* getClient(uint32_t ip) {
 
 // ---- DNS 解析 ----
 static size_t parseQuery(const uint8_t* pkt, int len, char* out, uint16_t* qtype, int* qend) {
-  if (len < 13) return 0;
+  if (!dnsQuestionEnd(pkt, len) || (pkt[2]&0x80)) return 0;
   int i = 12; size_t o = 0;
   while (i < len) {
     uint8_t l = pkt[i++];
     if (l == 0) break;
     if (l & 0xC0) return 0;
-    if (o + l + 1 >= 250 || i + l > len) return 0;
+    if (o + l + 1 >= 255 || i + l > len) return 0;
     if (o) out[o++] = '.';
     for (uint8_t k = 0; k < l; k++) out[o++] = tolower(pkt[i++]);
   }
@@ -341,9 +377,38 @@ struct Pending {
   uint16_t originalID;
   uint32_t sentMs;
   bool active;
+  bool backup;
+  uint16_t wireID, queryLen;
 };
 Pending pending[MAX_PENDING];
 int pendingCount = 0;
+static uint8_t* pendingQueries = nullptr;
+static int pendingCapacity = MAX_PENDING;
+static uint16_t nextDnsID = 0;
+static uint8_t tcpQuery[DNS_BUF_SIZE];
+static bool tcpBackup = false;
+static uint16_t tcpWireID = 0;
+static void initDnsMemory() {
+  pendingQueries = (uint8_t*)heap_caps_malloc(MAX_PENDING*DNS_BUF_SIZE, MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if (!pendingQueries) {
+    pendingCapacity=4;
+    pendingQueries=(uint8_t*)heap_caps_malloc(4*DNS_BUF_SIZE,MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+  }
+  if (!pendingQueries) pendingCapacity=0;
+  nextDnsID=uint16_t(esp_random());
+}
+static void sendPending(int i) {
+  Pending& p=pending[i];
+  upstream.beginPacket(p.backup ? dnsSecondary : dnsPrimary,DNS_PORT);
+  upstream.write(pendingQueries+i*DNS_BUF_SIZE,p.queryLen); upstream.endPacket(); p.sentMs=millis();
+}
+static void dnsFailure(uint8_t* q,int len) {
+  q[2]=(q[2]&1)|0x80; q[3]=0x82;
+  memset(q+6,0,6);
+  // 保留一个问题，丢弃 EDNS 及其他附加记录。
+  (void)len;
+}
+
 
 // 每轮在客户端套接字（handleDns）和上游套接字（pollUpstream）上各
 // 处理一小批数据报。这并不会抬高突发上限：SDK 的 lwIP UDP 接收邮箱
@@ -358,37 +423,38 @@ int pendingCount = 0;
 static const int DNS_DRAIN_MAX = 8;
 
 static int findFreeSlot() {
-  for (int i = 0; i < MAX_PENDING; i++) if (!pending[i].active) return i;
+  for (int i = 0; i < pendingCapacity; i++) if (!pending[i].active) return i;
   return -1;
 }
 static void expirePending() {
-  uint32_t now = millis();
-  for (int i = 0; i < MAX_PENDING; i++)
-    if (pending[i].active && (now - pending[i].sentMs) > UPSTREAM_TIMEOUT_MS) {
-      pending[i].active = false;
-      pendingCount--;
+  uint32_t now=millis();
+  for(int i=0;i<pendingCapacity;++i) {
+    Pending& p=pending[i];
+    if(!p.active || now-p.sentMs<UPSTREAM_TIMEOUT_MS) continue;
+    if(!p.backup && dnsSecondary!=dnsPrimary) { p.backup=true; ++dnsRetries; sendPending(i); }
+    else {
+      uint8_t* q=pendingQueries+i*DNS_BUF_SIZE;
+      q[0]=p.originalID>>8; q[1]=p.originalID; dnsFailure(q,p.queryLen);
+      dnsServer.beginPacket(p.clientIP,p.clientPort); dnsServer.write(q,dnsQuestionEnd(q,p.queryLen)); dnsServer.endPacket();
+      p.active=false; --pendingCount; ++dnsTimeouts;
     }
+  }
 }
-static void pollUpstream(uint8_t* buf, int bufSize) {
-  // 排空一小批：上游套接字与客户端套接字共用同一个深度为 6 的
-  // lwIP 接收邮箱，因此当转发出去的一批一起返回时，每轮 loop()
-  // 只处理一条应答就会把它灌满，多余的应答会被丢弃（客户端只能
-  // 干等到超时）。与客户端排空一样设有上限，这样某个繁忙瞬间
-  // 不会饿死 web 服务器、OTA 和面板服务。
-  for (int i = 0; i < DNS_DRAIN_MAX; i++) {
-    int sz = upstream.parsePacket();
-    if (sz <= 0) return;
-    int rlen = upstream.read(buf, bufSize);
-    if (rlen < 2) continue;
-    uint16_t replyID = (buf[0] << 8) | buf[1];
-    if (replyID >= MAX_PENDING || !pending[replyID].active) continue;
-    buf[0] = (pending[replyID].originalID >> 8) & 0xFF;
-    buf[1] = pending[replyID].originalID & 0xFF;
-    dnsServer.beginPacket(pending[replyID].clientIP, pending[replyID].clientPort);
-    dnsServer.write(buf, rlen);
-    dnsServer.endPacket();
-    pending[replyID].active = false;
-    pendingCount--;
+static void pollUpstream(uint8_t* buf,int bufSize) {
+  for(int k=0;k<DNS_DRAIN_MAX;++k) {
+    int sz=upstream.parsePacket(); if(sz<=0) return;
+    IPAddress source=upstream.remoteIP(); uint16_t port=upstream.remotePort();
+    int len=upstream.read(buf,bufSize);
+    if(sz>bufSize || len<12 || port!=DNS_PORT) { ++dnsRejected; continue; }
+    int i=0;
+    for(;i<pendingCapacity;++i) if(pending[i].active && pending[i].wireID==dns16(buf)) break;
+    if(i==pendingCapacity) { ++dnsRejected; continue; }
+    Pending& p=pending[i]; uint8_t* q=pendingQueries+i*DNS_BUF_SIZE;
+    if(source!=(p.backup?dnsSecondary:dnsPrimary) || !dnsReplyMatches(q,p.queryLen,buf,len)) { ++dnsRejected; continue; }
+    dnsCache.put(q,p.queryLen,buf,len,millis());
+    buf[0]=p.originalID>>8; buf[1]=p.originalID;
+    dnsServer.beginPacket(p.clientIP,p.clientPort); dnsServer.write(buf,len); dnsServer.endPacket();
+    p.active=false; --pendingCount;
   }
 }
 
@@ -402,14 +468,15 @@ static bool serveOneDns() {
   IPAddress cip = dnsServer.remoteIP();
   uint16_t cport = dnsServer.remotePort();
   int qlen = dnsServer.read(dnsBuf, sizeof(dnsBuf));
-  if (qlen < 13) return true;
+  if (sz > DNS_BUF_SIZE || qlen < 13) return true;
 
   char domain[256]; uint16_t qtype = 0; int qend = qlen;
   size_t dl = parseQuery(dnsBuf, qlen, domain, &qtype, &qend);
+  if (!dnsQuestionEnd(dnsBuf,qlen) || (dnsBuf[2]&0x80) || qend+28>DNS_BUF_SIZE) { ++dnsRejected; return true; }
 
   Dev* c = getClient((uint32_t)cip);
   bool ban = c && c->banned;
-  bool blocked = ban || (dl && numHashes && isBlocked(domain, dl));
+  bool blocked = ban || (dl && isBlocked(domain, dl));
 
   if (blocked) {
     int rlen = buildBlocked(dnsBuf, qend, qtype);
@@ -419,22 +486,24 @@ static bool serveOneDns() {
     dnsServer.write(dnsBuf, rlen);
     dnsServer.endPacket();
   } else {
-    int slot = findFreeSlot();
-    if (slot < 0) return true;
-    uint16_t origID = (dnsBuf[0] << 8) | dnsBuf[1];
-    dnsBuf[0] = (slot >> 8) & 0xFF;
-    dnsBuf[1] = slot & 0xFF;
-    pending[slot].clientIP = (uint32_t)cip;
-    pending[slot].clientPort = cport;
-    pending[slot].originalID = origID;
-    pending[slot].sentMs = millis();
-    pending[slot].active = true;
-    pendingCount++;
-    upstream.beginPacket(UPSTREAM, 53);
-    upstream.write(dnsBuf, qlen);
-    upstream.endPacket();
-    totalAllowed++;
-    if (c) c->allowed++;
+    totalAllowed++; if(c) c->allowed++;
+    size_t cachedLen=0;
+    uint8_t reply[512];
+    if(dnsCache.get(dnsBuf,qlen,millis(),reply,cachedLen)) {
+      dnsServer.beginPacket(cip,cport); dnsServer.write(reply,cachedLen); dnsServer.endPacket();
+    } else {
+      int slot=findFreeSlot();
+      if(slot<0) {
+        dnsFailure(dnsBuf,qlen); dnsServer.beginPacket(cip,cport);
+        dnsServer.write(dnsBuf,qend); dnsServer.endPacket(); ++dnsTimeouts;
+      } else {
+        Pending& p=pending[slot];
+        p.clientIP=uint32_t(cip); p.clientPort=cport; p.originalID=dns16(dnsBuf);
+        p.wireID=++nextDnsID; p.queryLen=qlen; p.backup=false; p.active=true;
+        dnsBuf[0]=p.wireID>>8; dnsBuf[1]=p.wireID;
+        memcpy(pendingQueries+slot*DNS_BUF_SIZE,dnsBuf,qlen); ++pendingCount; sendPending(slot);
+      }
+    }
   }
 
   // 喂给仪表盘。只有带域名的查询才计入统计，这样畸形包就
@@ -532,9 +601,10 @@ static void handleTcpDns() {
 
     char domain[256]; uint16_t qtype = 0; int qend = tcpGot;
     size_t dl = parseQuery(tcpBuf, tcpGot, domain, &qtype, &qend);
+    if(!dnsQuestionEnd(tcpBuf,tcpGot) || (tcpBuf[2]&0x80) || qend+28>DNS_BUF_SIZE) { ++dnsRejected; tcpDnsReset(); return; }
     Dev* c = getClient((uint32_t)tcpDnsClient.remoteIP());
     bool ban = c && c->banned;
-    bool blocked = ban || (dl && numHashes && isBlocked(domain, dl));
+    bool blocked = ban || (dl && isBlocked(domain, dl));
 
     if (blocked) {
       int rlen = buildBlocked(tcpBuf, qend, qtype);
@@ -544,35 +614,38 @@ static void handleTcpDns() {
       return;
     }
 
-    // 转发：把 ID 改写成哨兵值，记住客户端原来的 ID，然后转入
-    // 等待状态。应答会在之后的某一轮被取回。
-    tcpQueryID = (tcpBuf[0] << 8) | tcpBuf[1];
-    tcpBuf[0] = 0xFF; tcpBuf[1] = 0xFE;
-    tcpUpstream.beginPacket(UPSTREAM, 53);
-    tcpUpstream.write(tcpBuf, tcpGot);
-    tcpUpstream.endPacket();
-    totalAllowed++; if (c) c->allowed++;
-    if (dl) trackerRecord(domain, blocked);
-    tcpState    = TCP_FORWARD;
-    tcpDeadline = millis() + UPSTREAM_TIMEOUT_MS;
-    return;
+    totalAllowed++; if(c) c->allowed++;
+    if(dl) trackerRecord(domain,false);
+    size_t cachedLen=0;
+    uint8_t cached[512];
+    if(dnsCache.get(tcpBuf,tcpGot,millis(),cached,cachedLen)) { tcpDnsReply(cached,cachedLen); return; }
+    tcpQueryID=dns16(tcpBuf); tcpWireID=++nextDnsID; tcpBackup=false;
+    tcpBuf[0]=tcpWireID>>8; tcpBuf[1]=tcpWireID;
+    memcpy(tcpQuery,tcpBuf,tcpGot);
+    tcpUpstream.beginPacket(dnsPrimary,DNS_PORT); tcpUpstream.write(tcpQuery,tcpGot); tcpUpstream.endPacket();
+    tcpState=TCP_FORWARD; tcpDeadline=millis()+UPSTREAM_TIMEOUT_MS; return;
   }
-
-  // TCP_FORWARD：上游应答到达的是 tcpUpstream 而不是客户端套接字，
-  // 因此轮询它并让出控制权，直到应答出现或超过截止时间。
-  int sz = tcpUpstream.parsePacket();
-  if (sz > 0) {
-    int n = tcpUpstream.read(tcpBuf, DNS_BUF_SIZE);
-    if (n >= 12) {
-      tcpBuf[0] = (tcpQueryID >> 8) & 0xFF;
-      tcpBuf[1] = tcpQueryID & 0xFF;
-      tcpDnsReply(tcpBuf, n);
-    } else {
-      tcpDnsReset();
+  int sz=tcpUpstream.parsePacket();
+  if(sz>0) {
+    IPAddress source=tcpUpstream.remoteIP(); uint16_t port=tcpUpstream.remotePort();
+    int n=tcpUpstream.read(tcpBuf,DNS_BUF_SIZE);
+    if(sz<=DNS_BUF_SIZE && port==DNS_PORT && source==(tcpBackup?dnsSecondary:dnsPrimary) &&
+       dnsReplyMatches(tcpQuery,tcpGot,tcpBuf,n)) {
+      dnsCache.put(tcpQuery,tcpGot,tcpBuf,n,millis());
+      tcpBuf[0]=tcpQueryID>>8; tcpBuf[1]=tcpQueryID; tcpDnsReply(tcpBuf,n); return;
     }
-    return;
+    ++dnsRejected;
   }
-  if ((int32_t)(millis() - tcpDeadline) >= 0) tcpDnsReset();
+  if(int32_t(millis()-tcpDeadline)>=0) {
+    if(!tcpBackup && dnsPrimary!=dnsSecondary) {
+      tcpBackup=true; ++dnsRetries;
+      tcpUpstream.beginPacket(dnsSecondary,DNS_PORT); tcpUpstream.write(tcpQuery,tcpGot); tcpUpstream.endPacket();
+      tcpDeadline=millis()+UPSTREAM_TIMEOUT_MS;
+    } else {
+      tcpQuery[0]=tcpQueryID>>8; tcpQuery[1]=tcpQueryID; dnsFailure(tcpQuery,tcpGot);
+      ++dnsTimeouts; tcpDnsReply(tcpQuery,dnsQuestionEnd(tcpQuery,tcpGot));
+    }
+  }
 }
 // ---- 认证（Basic Auth + CSRF token）----
 String authPassword;
@@ -598,8 +671,10 @@ static void genRandomPassword() {
   const char chars[] = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
   authPassword = "";
   for (int i = 0; i < 10; i++) authPassword += chars[esp_random() % (sizeof(chars) - 1)];
-  authToken = String((uint32_t)(esp_random() & 0xFFFFFF), HEX);
+  authToken="";
+  for(int i=0;i<4;++i) { char h[9]; snprintf(h,sizeof(h),"%08lx",(unsigned long)esp_random()); authToken+=h; }
 }
+static bool saveAuth();
 static void loadAuth() {
   File f = LittleFS.open("/auth.cfg", "r");
   if (f) {
@@ -607,16 +682,18 @@ static void loadAuth() {
     authToken = f.readStringUntil('\n'); authToken.trim();
     f.close();
   }
+  if (authPassword.length() && authToken.length()<32) {
+    authToken=""; for(int i=0;i<4;++i) { char h[9]; snprintf(h,sizeof(h),"%08lx",(unsigned long)esp_random()); authToken+=h; } saveAuth();
+  }
   if (authPassword.length() == 0) {
     genRandomPassword();
-    File fo = LittleFS.open("/auth.cfg", "w");
-    if (fo) { fo.println(authPassword); fo.println(authToken); fo.close(); }
-    LOG("[AUTH] created admin account: user admin password %s\n", authPassword.c_str());
+    if(!saveAuth()) Serial.println("[AUTH] 凭据保存失败，本次密码仅在当前启动有效");
+    Serial.printf("[AUTH] 已创建管理员，用户名 admin，密码 %s\n",authPassword.c_str());
   } else {
     // 有意每次开机都打印 admin 账号密码。控制台有 Basic Auth 把守，
     // 否则忘记密码就意味着要经串口擦除 /auth.cfg；而这个端口本身
     // 就等同于对设备的物理接触。
-    LOG("[AUTH] admin account: user admin password %s\n", authPassword.c_str());
+    Serial.printf("[AUTH] 管理员用户名 admin，密码 %s\n",authPassword.c_str());
   }
 }
 static bool checkAuth() {
@@ -624,7 +701,7 @@ static bool checkAuth() {
   return web.header("Authorization") == expected;
 }
 static bool checkToken() {
-  return web.hasArg("token") && web.arg("token") == authToken;
+  return authToken.length() >= 32 && ((web.hasArg("token") && web.arg("token") == authToken) || web.header("X-CSRF-Token") == authToken);
 }
 static void requireAuth() {
   web.sendHeader("WWW-Authenticate", "Basic realm=\"AdBlock\"");
@@ -634,10 +711,7 @@ static void requireAuth() {
 // 把管理员密码与 CSRF token 持久化到 /auth.cfg（第 1 行为密码，
 // 第 2 行为 token）。用户在控制台里修改密码时调用，让新密码在
 // 重启后依然有效。
-static void saveAuth() {
-  File f = LittleFS.open("/auth.cfg", "w");
-  if (f) { f.println(authPassword); f.println(authToken); f.close(); }
-}
+static bool saveAuth() { return writeConfig("/auth.cfg",authPassword+"\n"+authToken+"\n"); }
 
 // ---- web 服务器 ----
 static String macStr(const uint8_t* m) {
@@ -646,7 +720,11 @@ static String macStr(const uint8_t* m) {
 }
 static String jesc(const String& s) {
   String o;
-  for (char ch : s) { if (ch == '"' || ch == '\\') o += '\\'; o += ch; }
+  for (unsigned char ch : s) {
+    if (ch == '"' || ch == '\\') o += '\\';
+    if (ch < 32) { char b[7]; snprintf(b,sizeof(b),"\\u%04x",ch); o+=b; }
+    else o += char(ch);
+  }
   return o;
 }
 
@@ -696,7 +774,7 @@ static void handleStats() {
   // 体积可达约 17 KB）。用这种方式增长 String 会反复重新分配并拷贝，
   // 恰是造成 ESP32 堆碎片化的那种折腾。改为按实际计数一次性
   // 预留好容量。
-  size_t est = 320 + (size_t)numClients * 96 + (size_t)numCustom * 34 +
+  size_t est = 1400 + (size_t)numClients * 96 + (size_t)numCustom * 34 +
                (size_t)TOPN_SLOTS * 48 + (size_t)HIST_SLOTS * 8;
   String j;
   j.reserve(est);
@@ -716,9 +794,18 @@ static void handleStats() {
   for (int i = 0; i < TOPN_SLOTS; i++) {
     if (!t[i].domain[0]) continue;
     j += (i ? "," : "");
-    j += "{\"d\":\"" + jesc(String(t[i].domain)) + "\",\"n\":" + t[i].count + "}";
+    j += "{\"d\":\"" + jesc(String(t[i].domain)) + "\",\"n\":" + t[i].count + ",\"error\":" + t[i].error + "}";
   }
-  j += "],\"hours\":[";
+  j += "],\"dnsPrimary\":\""+dnsPrimary.toString()+"\",\"dnsSecondary\":\""+dnsSecondary.toString()+"\"";
+  j += ",\"cacheHits\":"+String(dnsCache.hits)+",\"cacheMisses\":"+String(dnsCache.misses);
+  j += ",\"dnsRetries\":"+String(dnsRetries)+",\"dnsTimeouts\":"+String(dnsTimeouts)+",\"dnsRejected\":"+String(dnsRejected);
+  j += ",\"panel\":\""+String(epdStatus())+"\",\"panelError\":\""+String(epdError())+"\",\"panelFaults\":"+String(epdFaults());
+  j += ",\"panelRows\":"+String(epdRowsSent())+",\"maxLoopUs\":"+String(maxLoopUs);
+  j += ",\"updateBytes\":"+String(transferBytes.load())+",\"updateTotal\":"+String(transferTotal.load());
+  j += ",\"otaStatus\":\""+jesc(otaStatus)+"\",\"otaBytes\":"+String(otaBytes)+",\"otaTotal\":"+String(otaExpected);
+  const esp_partition_t* slot=esp_ota_get_next_update_partition(nullptr);
+  j += ",\"otaCapacity\":"+String(slot?slot->size:0)+",\"fsFree\":"+String(LittleFS.totalBytes()-LittleFS.usedBytes());
+  j += ",\"caConfigured\":"+String(LittleFS.exists(CA_PATH)?"true":"false")+",\"hours\":[";
   for (int i = 0; i < HIST_SLOTS; i++) { j += (i ? "," : ""); j += String(trackerHourBlocked(i)); }
   j += "],\"clients\":[";
 
@@ -752,9 +839,15 @@ static void handleBan() {
     uint32_t ipraw = (uint32_t)ip;
     Dev* c = getClient(ipraw);
     if (c) {
-      c->banned = !c->banned;
-      if (c->banned) addBannedIP(ipraw); else removeBannedIP(ipraw);
-      saveBanned();
+      bool next=!c->banned;
+      if(next && !addBannedIP(ipraw)) { web.send(409,"text/plain; charset=utf-8","封禁列表已满"); return; }
+      if(!next) removeBannedIP(ipraw);
+      c->banned=next;
+      dnsCache.clear();
+      if(!saveBanned()) {
+        loadBanned(); for(int i=0;i<numClients;++i) clients[i].banned=isBannedIP(clients[i].ip);
+        web.send(500,"text/plain; charset=utf-8","封禁配置保存失败"); return;
+      }
     }
   }
   web.send(200, "text/plain", "ok");
@@ -762,29 +855,26 @@ static void handleBan() {
 static void handleAddBlock() {
   if (!checkAuth()) { requireAuth(); return; }
   if (!checkToken()) { web.send(403, "text/plain", "bad token"); return; }
-  addCustom(web.arg("d"));
-  web.send(200, "text/plain", "ok");
+  bool ok=addCustom(web.arg("d"));
+  web.send(ok?200:400, "text/plain; charset=utf-8", ok?"已添加":"无效、重复、已满或保存失败");
 }
 static void handleUnblock() {
   if (!checkAuth()) { requireAuth(); return; }
   if (!checkToken()) { web.send(403, "text/plain", "bad token"); return; }
-  removeCustom(web.arg("d"));
-  web.send(200, "text/plain", "ok");
+  bool ok=removeCustom(web.arg("d"));
+  web.send(ok?200:400, "text/plain; charset=utf-8", ok?"已移除":"规则不存在或保存失败");
 }
 // ---- 远程黑名单配置（持久化在 /update.cfg）----
 // 该 URL 必须返回一个已经是本固件二进制格式的文件，因此实际上它
 // 指向用户托管在某处的一份 blocklist.bin 副本。通过控制台上传
 // .bin 文件则覆盖其余情况。
-static void saveUpdateCfg() {
-  File f = LittleFS.open("/update.cfg", "w");
-  if (f) { f.println(updateUrl); f.println((unsigned long)updateIntervalH); f.close(); }
-}
+static bool saveUpdateCfg() { return writeConfig("/update.cfg",updateUrl+"\n"+String(updateIntervalH)+"\n"); }
 static void loadUpdateCfg() {
   File f = LittleFS.open("/update.cfg", "r");
   if (!f) return;
   updateUrl = f.readStringUntil('\n'); updateUrl.trim();
   long iv = f.readStringUntil('\n').toInt();
-  if (iv >= 0) updateIntervalH = (uint32_t)iv;
+  if (iv >= 0 && iv <= 720) updateIntervalH = (uint32_t)iv;
   f.close();
   if (updateUrl.length() > 0) {
     LOG("[UPD] auto-update every %lu h from %s\n",
@@ -794,10 +884,14 @@ static void loadUpdateCfg() {
 static void handleSetUpdate() {
   if (!checkAuth()) { requireAuth(); return; }
   if (!checkToken()) { web.send(403, "text/plain", "bad token"); return; }
-  updateUrl = web.arg("url"); updateUrl.trim();
+  if(updateOwner!=UpdateOwner::None) { web.send(409,"text/plain; charset=utf-8","正在更新，请稍后修改配置"); return; }
+  String url=web.arg("url"); url.trim();
+  if(url.length()>1024 || (url.length() && !url.startsWith("http://") && !url.startsWith("https://"))) { web.send(400,"text/plain; charset=utf-8","URL 无效"); return; }
   long iv = web.arg("iv").toInt();
-  updateIntervalH = (iv < 0) ? 0 : (uint32_t)iv;
-  saveUpdateCfg();
+  if(iv<0 || iv>720) { web.send(400,"text/plain; charset=utf-8","间隔必须为 0..720 小时"); return; }
+  String oldUrl=updateUrl; uint32_t oldInterval=updateIntervalH;
+  updateUrl=url; updateIntervalH = (uint32_t)iv;
+  if(!saveUpdateCfg()) { updateUrl=oldUrl; updateIntervalH=oldInterval; web.send(500,"text/plain; charset=utf-8","更新配置保存失败"); return; }
   web.send(200, "text/plain", "ok");
 }
 
@@ -809,19 +903,18 @@ static void handleSetWifi() {
   String ssid = web.arg("ssid");
   String pass = web.arg("pass");
   if (ssid.length() == 0) { web.send(400, "text/plain", "missing ssid"); return; }
-  File f = LittleFS.open("/wifi.cfg", "w");
-  if (f) { f.println(ssid); f.println(pass); f.close(); }
-  web.send(200, "text/plain", "saved - rebooting...");
-  delay(500);
-  ESP.restart();
+  if(ssid.length()>32 || pass.length()>63 || ssid.indexOf('\n')>=0 || pass.indexOf('\n')>=0 || ssid.indexOf('\r')>=0 || pass.indexOf('\r')>=0) {
+    web.send(400,"text/plain; charset=utf-8","WiFi 配置无效"); return;
+  }
+  if(!writeConfig("/wifi.cfg",ssid+"\n"+pass+"\n")) { web.send(500,"text/plain; charset=utf-8","WiFi 配置写入失败"); return; }
+  web.send(200,"text/plain; charset=utf-8","已保存，即将重启"); restartAt=millis()+700;
 }
 
 // ---- 修改管理员密码 ----
 // 由控制台调用，而控制台受 Basic Auth 保护：能走到这里的请求
 // 已经用当前密码验证过了，因此无需再次提交旧密码。新密码直接
 // 写入 /auth.cfg 并在下一次请求时生效——浏览器仍缓存着旧凭据，
-// 会重新弹出认证提示。错误响应体保持 ASCII（与其他端点一致）；
-// 控制台会把它们转成中文 toast，因此不需要为此准备面板字形。
+// 会重新弹出认证提示；控制台错误信息无需新增面板字形。
 static void handleSetPass() {
   if (!checkAuth()) { requireAuth(); return; }
   if (!checkToken()) { web.send(403, "text/plain", "bad token"); return; }
@@ -844,8 +937,8 @@ static void handleSetPass() {
     web.send(400, "text/plain", "same");
     return;
   }
-  authPassword = np;
-  saveAuth();
+  String previous=authPassword; authPassword=np;
+  if(!saveAuth()) { authPassword=previous; web.send(500,"text/plain; charset=utf-8","密码保存失败，旧密码仍有效"); return; }
   LOG("[AUTH] admin password changed, user admin password %s\n", authPassword.c_str());
   web.send(200, "text/plain", "ok");
 }
@@ -928,41 +1021,145 @@ static bool installStagedBlocklist() {
     loadBlocklist();
     return false;
   }
+  dnsCache.clear();
   return loadBlocklist();
 }
 
-// ---- 远程黑名单拉取 ----
+// 下载任务只拥有网络连接和临时文件；绝不改全局 Bloom 或旧黑名单句柄。
+// 终态通过队列交给主循环，安装只在任务释放临时文件之后发生。
+struct DownloadJob { String url, ca; uint32_t capacity; };
+class DownloadIO {
+  WiFiClient& client; File& file;
+  uint32_t start, lastRead, capacity;
+public:
+  bool failed=false;
+  DownloadIO(WiFiClient& c,File& f,uint32_t cap):client(c),file(f),start(millis()),lastRead(start),capacity(cap) {}
+  int read(uint8_t* out,size_t want) {
+    for(;;) {
+      uint32_t now=millis();
+      if(cancelDownload.load() || now-start>=120000 || now-lastRead>=5000) { failed=true; return -1; }
+      int available=client.available();
+      if(available>0) {
+        int n=client.read(out,min(want,size_t(available)));
+        if(n>0) { lastRead=now; return n; }
+      } else if(!client.connected()) return 0;
+      vTaskDelay(1);
+    }
+  }
+  bool write(const uint8_t* b,size_t n) {
+    uint32_t done=transferBytes.load();
+    if(done>capacity || n>capacity-done || file.write(b,n)!=n) { failed=true; return false; }
+    transferBytes=done+n; vTaskDelay(1); return true;
+  }
+  void total(uint32_t n) { transferTotal=n; }
+};
+static bool parseDownloadUrl(const String& url,String& host,String& path,uint16_t& port,bool& https) {
+  https=url.startsWith("https://");
+  if(!https && !url.startsWith("http://")) return false;
+  for(unsigned char c:url) if(c<=32 || c==127) return false;
+  int start=https?8:7, slash=url.indexOf('/',start), query=url.indexOf('?',start);
+  int end=slash<0?url.length():slash;
+  if(query>=0 && query<end) end=query;
+  String authority=url.substring(start,end);
+  if(!authority.length() || authority.indexOf('@')>=0 || authority.indexOf('#')>=0 || authority.indexOf('[')>=0) return false;
+  port=https?443:80;
+  int colon=authority.indexOf(':');
+  if(colon>=0) {
+    String value=authority.substring(colon+1); if(!value.length()) return false;
+    for(char c:value) if(c<'0'||c>'9') return false;
+    long n=value.toInt(); if(n<1||n>65535) return false; port=n;
+    authority=authority.substring(0,colon);
+  }
+  if(!authority.length() || authority.length()>253) return false;
+  for(char c:authority) if(!isalnum(c) && c!='.' && c!='-') return false;
+  host=authority; path=end==int(url.length())?"/":url.substring(end);
+  if(path[0]=='?') path="/"+path;
+  return path.indexOf('#')<0;
+}
+static void downloadTask(void* arg) {
+  DownloadJob* job=static_cast<DownloadJob*>(arg);
+  DownloadResult result{};
+  WiFiClient plain; WiFiClientSecure secure;
+  String host,path; uint16_t port=0; bool https=false;
+  bool parsed=parseDownloadUrl(job->url,host,path,port,https);
+  if(https) { secure.setCACert(job->ca.c_str()); secure.setHandshakeTimeout(10); }
+  WiFiClient& client=https?static_cast<WiFiClient&>(secure):plain;
+  bool connected=parsed && !cancelDownload.load() && client.connect(host.c_str(),port,5000);
+  if(!connected) snprintf(result.message,sizeof(result.message),"连接失败，请检查 URL、网络、CA 与时间");
+  else {
+    client.setTimeout(5);
+    String request="GET "+path+" HTTP/1.1\r\nHost: "+host+":"+String(port)+"\r\nConnection: close\r\nAccept-Encoding: identity\r\nUser-Agent: AdBlock-EPD/1.3\r\n\r\n";
+    if(client.write((const uint8_t*)request.c_str(),request.length())!=request.length()) {
+      snprintf(result.message,sizeof(result.message),"HTTP 请求发送失败");
+    } else {
+      File tmp=LittleFS.open(BLOCKLIST_TMP,"w");
+      if(!tmp) snprintf(result.message,sizeof(result.message),"无法写入临时文件");
+      else {
+        DownloadIO io(client,tmp,job->capacity); HttpReader<DownloadIO> reader(io);
+        result.staged=reader.run() && !io.failed && !cancelDownload.load() && transferBytes.load()>=BL_HEADER_SIZE;
+        tmp.flush(); tmp.close();
+        snprintf(result.message,sizeof(result.message),"%s",result.staged?"下载完成，等待校验安装":"HTTP 响应无效、空间不足、传输中断或超时");
+      }
+    }
+  }
+  client.stop(); delete job;
+  if(!result.staged) LittleFS.remove(BLOCKLIST_TMP);
+  xQueueOverwrite(downloadQueue,&result); vTaskDelete(nullptr);
+}
 static bool fetchBlocklist(String url) {
-  if (url.length() == 0) return false;
-  const bool https = url.startsWith("https://");
-  if (!https && !url.startsWith("http://")) { DASH_SETSTATUS("URL 无效"); return false; }
-  HTTPClient http;
-  WiFiClient plain;
-  WiFiClientSecure secure;
-  bool begun = https ? http.begin(secure, url) : http.begin(plain, url);
-  if (!begun) { DASH_SETSTATUS("URL 无效"); return false; }
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  int code = http.GET();
-  if (code != 200) {
-    http.end();
-    DASH_SETSTATUS("HTTP " + String(code));
-    return false;
+  if(updateOwner!=UpdateOwner::None || WiFi.status()!=WL_CONNECTED || !downloadQueue) return false;
+  bool https=url.startsWith("https://");
+  if(!https && !url.startsWith("http://")) { updateStatus="URL 无效"; return false; }
+  String ca;
+  if(https) {
+    if(time(nullptr)<1700000000) { updateStatus="HTTPS 需要先完成 NTP 对时"; return false; }
+    File f=LittleFS.open(CA_PATH,"r");
+    if(!f || f.size()>8192) { if(f) f.close(); updateStatus="HTTPS 需要配置 PEM CA"; return false; }
+    ca=f.readString(); f.close();
+    if(!ca.length()) { updateStatus="HTTPS CA 为空"; return false; }
   }
-  File tmp = LittleFS.open(BLOCKLIST_TMP, "w");
-  if (!tmp) { http.end(); DASH_SETSTATUS("无法写入临时文件"); return false; }
-  const int expected = http.getSize();
-  const int written = http.writeToStream(&tmp);
-  tmp.close();
-  http.end();
-  if (written < BL_HEADER_SIZE || (expected >= 0 && written != expected)) {
-    LittleFS.remove(BLOCKLIST_TMP);
-    DASH_SETSTATUS("下载不完整或写入失败");
-    return false;
+  uint32_t freeSpace=LittleFS.totalBytes()-LittleFS.usedBytes();
+  if(freeSpace<=8192) { updateStatus="临时文件空间不足"; return false; }
+  DownloadJob* job=new(std::nothrow) DownloadJob{url,ca,freeSpace-8192};
+  if(!job) { updateStatus="下载任务内存不足"; return false; }
+  updateOwner=UpdateOwner::Remote; transferBytes=0; transferTotal=0; cancelDownload=false; transferStarted=millis();
+  updateStatus="后台下载中";
+  if(xTaskCreate(downloadTask,"blocklist",12288,job,1,nullptr)!=pdPASS) {
+    delete job; updateOwner=UpdateOwner::None; updateStatus="无法创建下载任务"; return false;
   }
-  if (!installStagedBlocklist()) { DASH_SETSTATUS("黑名单校验或替换失败"); return false; }
-  DASH_SETSTATUS("更新成功");
   return true;
+}
+static void serviceDownload() {
+  if(updateOwner!=UpdateOwner::Remote) return;
+  if(millis()-transferStarted>=120000 || WiFi.status()!=WL_CONNECTED) cancelDownload=true;
+  DownloadResult result;
+  if(xQueueReceive(downloadQueue,&result,0)==pdTRUE) {
+    updateStatus=result.message;
+    if(result.staged) updateStatus=installStagedBlocklist()?"更新成功":"黑名单校验或替换失败，保留旧表";
+    updateOwner=UpdateOwner::None;
+  }
+}
+static void handleFetchNow() {
+  if(!checkAuth()) { requireAuth(); return; }
+  if(!checkToken()) { web.send(403,"text/plain","bad token"); return; }
+  bool started=fetchBlocklist(updateUrl);
+  web.send(started?202:409,"text/plain; charset=utf-8",started?"已开始后台下载":updateStatus);
+}
+static void handleSetCA() {
+  if(!checkAuth()) { requireAuth(); return; }
+  if(!checkToken()) { web.send(403,"text/plain","bad token"); return; }
+  if(updateOwner!=UpdateOwner::None) { web.send(409,"text/plain; charset=utf-8","更新中，请稍后"); return; }
+  String pem=web.arg("pem");
+  if(pem.length()<64 || pem.length()>8192) { web.send(400,"text/plain; charset=utf-8","CA 长度必须为 64..8192 字节"); return; }
+  mbedtls_x509_crt chain; mbedtls_x509_crt_init(&chain);
+  int parsed=mbedtls_x509_crt_parse(&chain,(const unsigned char*)pem.c_str(),pem.length()+1);
+  mbedtls_x509_crt_free(&chain);
+  if(parsed!=0) { web.send(400,"text/plain; charset=utf-8","无法解析 PEM CA"); return; }
+  File f=LittleFS.open("/blocklist-ca.tmp","w");
+  bool ok=f && f.print(pem)==pem.length(); if(f) f.close();
+  ok=ok && LittleFS.rename("/blocklist-ca.tmp",CA_PATH);
+  if(!ok) LittleFS.remove("/blocklist-ca.tmp");
+  web.send(ok?200:500,"text/plain; charset=utf-8",ok?"CA 已保存":"CA 写入失败");
 }
 // ---- 配网门户（AP 模式）----
 static void startConfigPortal() {
@@ -974,65 +1171,109 @@ static void startConfigPortal() {
       AP_SSID_DEFAULT, WiFi.softAPIP().toString().c_str());
 }
 
-// 离开配网门户，回到 station 角色。配网表单保存完成后调用一次，
-// 免得开发板一直停在 AP 模式、对着一个没人再看的表单空耗——
-// 用户真正想要的是 DNS 引擎在工作。此时凭据已经写入 /wifi.cfg。
-static void stopConfigPortal() {
-  portalMode = false;
-  pendingPortalMessage = false;
-  WiFi.softAPdisconnect(true);
-  WiFi.mode(WIFI_STA);
-  LOG("[SETUP] portal closed, rejoining as a station\n");
+// ---- OTA 与规则上传：在 START 阶段先鉴权，失败不写、不激活、不重启 ----
+static esp_ota_handle_t otaHandle=0;
+static const esp_partition_t* otaPartition=nullptr;
+static bool otaAccepted=false, otaOk=false, ruleAccepted=false, blocklistUploadOk=false;
+static String otaSha;
+static mbedtls_sha256_context otaHash;
+static File blocklistUpload;
+static uint32_t uploadStarted=0;
+static void otaFail(const String& reason) {
+  otaStatus=reason; otaAccepted=false; otaOk=false;
+  if(otaHandle) { esp_ota_abort(otaHandle); otaHandle=0; }
+  mbedtls_sha256_free(&otaHash);
+  if(updateOwner==UpdateOwner::Firmware) updateOwner=UpdateOwner::None;
 }
-
-// ---- OTA ----
 static void handleUpdate() {
-  if (!checkAuth()) { requireAuth(); return; }
-  HTTPUpload& up = web.upload();
-  if (up.status == UPLOAD_FILE_START) {
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
-  } else if (up.status == UPLOAD_FILE_WRITE) {
-    if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
-  } else if (up.status == UPLOAD_FILE_END) {
-    if (Update.end(true)) Serial.println("OTA ok");
-  }
+  HTTPUpload& up=web.upload();
+  if(up.status==UPLOAD_FILE_START) {
+    otaOk=false;
+    if(!checkAuth() || !checkToken()) { otaStatus="认证或 CSRF 校验失败"; return; }
+    if(updateOwner!=UpdateOwner::None || restartAt) { otaStatus="另一项更新正在进行"; return; }
+    long expected=web.arg("size").toInt();
+    otaPartition=esp_ota_get_next_update_partition(nullptr);
+    if(!otaPartition || expected<24 || uint32_t(expected)>otaPartition->size) { otaStatus="固件长度无效或超过 OTA 分区"; return; }
+    otaSha=web.arg("sha256"); otaSha.toLowerCase();
+    if(otaSha.length() && otaSha.length()!=64) { otaStatus="SHA-256 必须为 64 位十六进制"; return; }
+    for(char ch:otaSha) if(!isxdigit(ch)) { otaStatus="SHA-256 格式无效"; return; }
+    esp_err_t err=esp_ota_begin(otaPartition,expected,&otaHandle);
+    if(err!=ESP_OK) { otaHandle=0; otaStatus="OTA 初始化失败："+String(esp_err_to_name(err)); return; }
+    mbedtls_sha256_init(&otaHash); mbedtls_sha256_starts_ret(&otaHash,0);
+    otaExpected=expected; otaBytes=0; otaAccepted=true; updateOwner=UpdateOwner::Firmware;
+    otaStatus="接收固件中"; uploadStarted=millis();
+  } else if(up.status==UPLOAD_FILE_WRITE && otaAccepted) {
+    if(up.currentSize>otaExpected-otaBytes || millis()-uploadStarted>=120000) { otaFail("固件长度不符或上传超时"); return; }
+    if(!otaBytes) {
+      if(up.currentSize<sizeof(esp_image_header_t)) { otaFail("固件头部不完整"); return; }
+      esp_image_header_t header; memcpy(&header,up.buf,sizeof(header));
+      if(header.magic!=ESP_IMAGE_HEADER_MAGIC || header.chip_id!=ESP_CHIP_ID_ESP32S2) { otaFail("不是 ESP32-S2 应用固件；不能上传合成镜像"); return; }
+    }
+    esp_err_t err=esp_ota_write(otaHandle,up.buf,up.currentSize);
+    if(err!=ESP_OK) { otaFail("OTA 写入失败："+String(esp_err_to_name(err))); return; }
+    mbedtls_sha256_update_ret(&otaHash,up.buf,up.currentSize); otaBytes+=up.currentSize;
+  } else if(up.status==UPLOAD_FILE_END && otaAccepted) {
+    if(otaBytes!=otaExpected || up.totalSize!=otaExpected) { otaFail("固件上传不完整"); return; }
+    uint8_t digest[32]; mbedtls_sha256_finish_ret(&otaHash,digest); mbedtls_sha256_free(&otaHash);
+    char hex[65]; for(int i=0;i<32;++i) snprintf(hex+2*i,3,"%02x",digest[i]);
+    if(otaSha.length() && otaSha!=hex) { otaFail("固件 SHA-256 不匹配"); return; }
+    esp_err_t err=esp_ota_end(otaHandle); otaHandle=0;
+    if(err==ESP_OK) err=esp_ota_set_boot_partition(otaPartition);
+    if(err!=ESP_OK) { otaFail("镜像校验或激活失败："+String(esp_err_to_name(err))); return; }
+    otaAccepted=false; otaOk=true; otaStatus="固件校验成功，等待重启";
+    updateOwner=UpdateOwner::None;
+  } else if(up.status==UPLOAD_FILE_ABORTED && otaAccepted) otaFail("固件上传已中断，未重启");
 }
 static void handleUpdateDone() {
-  if (!checkAuth()) { requireAuth(); return; }
-  web.send(200, "text/plain", Update.hasError() ? "fail" : "ok - rebooting");
-  delay(500);
-  ESP.restart();
+  if(!checkAuth()) { requireAuth(); return; }
+  if(!checkToken()) { web.send(403,"text/plain","bad token"); return; }
+  web.send(otaOk?200:400,"text/plain; charset=utf-8",otaStatus);
+  if(otaOk) { restartAt=millis()+1000; otaOk=false; }
 }
-static File blocklistUpload;
-static bool blocklistUploadOk = false;
+static void failRules() {
+  if(blocklistUpload) blocklistUpload.close();
+  LittleFS.remove(BLOCKLIST_TMP); ruleAccepted=false; blocklistUploadOk=false;
+  if(updateOwner==UpdateOwner::Rules) updateOwner=UpdateOwner::None;
+}
 static void handleBlocklistUpload() {
-  if (!checkAuth()) return;
-  HTTPUpload& up = web.upload();
-  if (up.status == UPLOAD_FILE_START) {
-    if (blocklistUpload) blocklistUpload.close();
-    blocklistUploadOk = false;
-    blocklistUpload = LittleFS.open(BLOCKLIST_TMP, "w");
-  } else if (up.status == UPLOAD_FILE_WRITE && blocklistUpload) {
-    if (blocklistUpload.write(up.buf, up.currentSize) != up.currentSize) {
-      blocklistUpload.close();
-      LittleFS.remove(BLOCKLIST_TMP);
+  HTTPUpload& up=web.upload();
+  if(up.status==UPLOAD_FILE_START) {
+    blocklistUploadOk=false;
+    if(!checkAuth() || !checkToken()) { updateStatus="认证或 CSRF 校验失败"; return; }
+    if(updateOwner!=UpdateOwner::None || restartAt) { updateStatus="另一项更新正在进行"; return; }
+    uint32_t available=LittleFS.totalBytes()-LittleFS.usedBytes();
+    long expected=web.arg("size").toInt();
+    if(expected<BL_HEADER_SIZE || available<=8192 || uint32_t(expected)>available-8192) { updateStatus="规则长度无效或临时空间不足"; return; }
+    transferTotal=expected; transferBytes=0; uploadStarted=millis();
+    blocklistUpload=LittleFS.open(BLOCKLIST_TMP,"w");
+    if(!blocklistUpload) { updateStatus="无法打开规则临时文件"; return; }
+    ruleAccepted=true; updateOwner=UpdateOwner::Rules; updateStatus="接收规则中";
+  } else if(up.status==UPLOAD_FILE_WRITE && ruleAccepted) {
+    uint32_t done=transferBytes.load();
+    if(up.currentSize>transferTotal.load()-done || millis()-uploadStarted>=120000 || blocklistUpload.write(up.buf,up.currentSize)!=up.currentSize) {
+      updateStatus="规则长度不符、超时或写入失败"; failRules(); return;
     }
-  } else if (up.status == UPLOAD_FILE_END && blocklistUpload) {
+    transferBytes=done+up.currentSize;
+  } else if(up.status==UPLOAD_FILE_END && ruleAccepted) {
+    bool complete=up.totalSize==transferTotal.load() && transferBytes.load()==transferTotal.load();
     blocklistUpload.close();
-    blocklistUploadOk = installStagedBlocklist();
-  } else if (up.status == UPLOAD_FILE_ABORTED) {
-    if (blocklistUpload) blocklistUpload.close();
-    LittleFS.remove(BLOCKLIST_TMP);
-    blocklistUploadOk = false;
-  }
+    blocklistUploadOk=complete && installStagedBlocklist();
+    if(!blocklistUploadOk) LittleFS.remove(BLOCKLIST_TMP);
+    ruleAccepted=false; updateOwner=UpdateOwner::None;
+    updateStatus=blocklistUploadOk?"黑名单已更新":"规则上传不完整或结构校验失败";
+  } else if(up.status==UPLOAD_FILE_ABORTED && ruleAccepted) { updateStatus="规则上传已中断"; failRules(); }
 }
 static void handleBlocklistDone() {
-  if (!checkAuth()) { requireAuth(); return; }
-  web.send(blocklistUploadOk ? 200 : 400, "text/plain; charset=utf-8",
-           blocklistUploadOk ? "黑名单已更新" : "黑名单上传或校验失败");
-  blocklistUploadOk = false;
+  if(!checkAuth()) { requireAuth(); return; }
+  if(!checkToken()) { web.send(403,"text/plain","bad token"); return; }
+  web.send(blocklistUploadOk?200:400,"text/plain; charset=utf-8",updateStatus); blocklistUploadOk=false;
 }
-
+static void serviceUploads() {
+  if(millis()-uploadStarted>=120000) {
+    if(otaAccepted) otaFail("固件上传超时，未重启");
+    if(ruleAccepted) { updateStatus="规则上传超时"; failRules(); }
+  }
+}
 // ---- WiFi ----
 // secrets.h 中的编译期取值在有人填入真实内容之前只是占位符，因此
 // 把出厂字符串视为「未配置」。
@@ -1046,8 +1287,8 @@ static bool connectWifi(uint32_t timeoutMs) {
 
   File f = LittleFS.open("/wifi.cfg", "r");
   if (f) {
-    ssid = f.readStringUntil('\n'); ssid.trim();
-    pass = f.readStringUntil('\n'); pass.trim();
+    ssid = f.readStringUntil('\n'); if(ssid.endsWith("\r")) ssid.remove(ssid.length()-1);
+    pass = f.readStringUntil('\n'); if(pass.endsWith("\r")) pass.remove(pass.length()-1);
     f.close();
     if (ssid.length() > 0) source = "from /wifi.cfg";
   }
@@ -1075,23 +1316,85 @@ static bool connectWifi(uint32_t timeoutMs) {
     LOG("[WIFI] no /wifi.cfg, trying the NVS network '%s'\n", (const char*)stored.sta.ssid);
     WiFi.begin();
   }
-  uint32_t t0 = millis();
-  uint32_t lastReport = 0;
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < timeoutMs) {
-    delay(100);
-    digitalWrite(PIN_LED, (millis() / 500) % 2);
-    if (millis() - t0 - lastReport >= 2000) {
-      lastReport = millis() - t0;
-      LOG("[WIFI] status %d at %us\n", (int)WiFi.status(), lastReport / 1000);
-    }
+  (void)timeoutMs;
+  digitalWrite(PIN_LED,LOW);
+  return true; // 只表示连接已启动，成功由 serviceWifi() 的 WL_CONNECTED 边沿判定。
+}
+static bool wifiConnecting=false, networkStarted=false, wifiEverConnected=false;
+static uint32_t wifiStarted=0, wifiNextTry=0;
+static uint8_t wifiFailures=0;
+static void stopDnsNetwork() {
+  dnsServer.stop(); upstream.stop(); tcpUpstream.stop(); tcpDnsServer.end(); tcpDnsReset();
+  for(auto& p:pending) p.active=false; pendingCount=0; dnsCache.clear(); MDNS.end();
+  networkStarted=false;
+}
+static void beginWifiAttempt() {
+  WiFi.disconnect(false,false);
+  if(!connectWifi(WIFI_TIMEOUT)) { startConfigPortal(); return; }
+  wifiConnecting=true; wifiStarted=millis();
+}
+static void serviceWifi() {
+  uint32_t now=millis();
+  if(portalMode) {
+    wifiConnecting=false;
+    if(networkStarted) stopDnsNetwork();
+    return;
   }
-  digitalWrite(PIN_LED, LOW);
-  return WiFi.status() == WL_CONNECTED;
+  if(WiFi.status()==WL_CONNECTED) {
+    wifiConnecting=false; wifiFailures=0; wifiEverConnected=true;
+    if(!networkStarted) {
+      if(dnsPrimary==WiFi.localIP()) dnsPrimary=IPAddress(9,9,9,9);
+      if(dnsSecondary==WiFi.localIP()) dnsSecondary=IPAddress(1,1,1,1);
+      dnsServer.begin(DNS_PORT); upstream.begin(0); tcpUpstream.begin(0);
+      tcpDnsServer.begin(); tcpDnsServer.setNoDelay(true);
+      configTime(NTP_UTC_OFFSET,0,"pool.ntp.org","time.nist.gov");
+      MDNS.begin(DNS_HOSTNAME); MDNS.addService("http","tcp",80);
+      networkStarted=true; lastDnsActivityMs=now; pendingRefresh=true;
+      LOG("[WIFI] 已连接 %s，DNS 服务已重新绑定\n",WiFi.localIP().toString().c_str());
+    }
+    digitalWrite(PIN_LED,LOW); return;
+  }
+  if(networkStarted) { stopDnsNetwork(); wifiNextTry=now+LIVE_WIFI_RETRY_MS; }
+  if(wifiConnecting) {
+    digitalWrite(PIN_LED,(now/500)%2);
+    if(now-wifiStarted>=WIFI_TIMEOUT) {
+      wifiConnecting=false; WiFi.disconnect(false,false); ++wifiFailures;
+      wifiNextTry=now+LIVE_WIFI_RETRY_MS;
+      LOG("[WIFI] 连接超时，失败 %u/%u\n",unsigned(wifiFailures),unsigned(WIFI_RETRY_BEFORE_PORTAL));
+      if(!wifiEverConnected || wifiFailures>=WIFI_RETRY_BEFORE_PORTAL) startConfigPortal();
+    }
+  } else if(int32_t(now-wifiNextTry)>=0) beginWifiAttempt();
+}
+static bool usableDnsIP(const IPAddress& ip) {
+  uint8_t first=ip[0];
+  return first!=0 && first!=127 && first<224 && ip!=WiFi.localIP() && ip!=WiFi.softAPIP();
+}
+static void loadDnsCfg() {
+  File f=LittleFS.open("/dns.cfg","r"); if(!f) return;
+  String a=f.readStringUntil('\n'),b=f.readStringUntil('\n'); f.close(); a.trim();b.trim();
+  IPAddress primary,secondary;
+  if(primary.fromString(a) && secondary.fromString(b) && usableDnsIP(primary) && usableDnsIP(secondary)) {
+    dnsPrimary=primary;dnsSecondary=secondary;
+  }
+}
+static void handleSetDns() {
+  if(!checkAuth()) { requireAuth(); return; }
+  if(!checkToken()) { web.send(403,"text/plain","bad token"); return; }
+  IPAddress a,b;
+  if(!a.fromString(web.arg("primary")) || !b.fromString(web.arg("secondary")) || !usableDnsIP(a) || !usableDnsIP(b)) {
+    web.send(400,"text/plain; charset=utf-8","请输入非本机、非回环的有效 IPv4 上游"); return;
+  }
+  File f=LittleFS.open("/dns.tmp","w");
+  bool ok=f && f.println(a.toString())==a.toString().length()+2 && f.println(b.toString())==b.toString().length()+2;
+  if(f) f.close(); ok=ok && LittleFS.rename("/dns.tmp","/dns.cfg");
+  if(!ok) { LittleFS.remove("/dns.tmp"); web.send(500,"text/plain; charset=utf-8","DNS 配置写入失败"); return; }
+  dnsPrimary=a; dnsSecondary=b; dnsCache.clear();
+  for(auto& p:pending) p.active=false; pendingCount=0; tcpDnsReset();
+  web.send(200,"text/plain; charset=utf-8","上游已保存；旧待处理查询需客户端重试");
 }
 // ---- setup / loop ----
 static uint32_t lastDashMs = 0;
 static uint32_t lastPeriodicPullMs = 0;
-static bool epdReady = false;
 
 void setup() {
   Serial.begin(115200);
@@ -1122,8 +1425,6 @@ void setup() {
   Serial.flush();
 
   gpioInit();
-  epdInit();
-  epdReady = true;
 
   trackerInit();
   trackerLoad();
@@ -1131,6 +1432,8 @@ void setup() {
   loadBanned();
   loadAuth();
   loadUpdateCfg();
+  downloadQueue=xQueueCreate(1,sizeof(DownloadResult));
+  initDnsMemory();
   LOG("[FS] persistence loaded heap=%u psram=%u\n", (unsigned)ESP.getFreeHeap(),
       (unsigned)ESP.getFreePsram());
   Serial.flush();
@@ -1185,6 +1488,9 @@ void setup() {
   web.on("/addblock", handleAddBlock);
   web.on("/unblock", handleUnblock);
   web.on("/setupdate", handleSetUpdate);
+  web.on("/fetch-now", HTTP_POST, handleFetchNow);
+  web.on("/setca", HTTP_POST, handleSetCA);
+  web.on("/setdns", HTTP_POST, handleSetDns);
   web.on("/setpass", HTTP_POST, handleSetPass);
   web.on("/setwifi", HTTP_POST, handleSetWifi);
   web.on("/update", HTTP_POST, handleUpdateDone, handleUpdate);
@@ -1193,40 +1499,21 @@ void setup() {
   web.begin();
   LOGN("[BOOT] routes registered, connecting to WiFi");
 
-  bool ok = connectWifi(WIFI_TIMEOUT);
-  LOG("[WIFI] connect %s after %lus\n", ok ? "ok" : "failed",
-      (unsigned long)deviceUptimeSec());
-  if (!ok) {
-    startConfigPortal();
-  } else {
-    configTime(NTP_UTC_OFFSET, 0, "pool.ntp.org", "time.nist.gov");
-    MDNS.begin(DNS_HOSTNAME);
-    MDNS.addService("http", "tcp", 80);
-
-    dnsServer.begin(DNS_PORT);
-    upstream.begin(0);
-    tcpUpstream.begin(0);
-    tcpDnsServer.begin();
-    tcpDnsServer.setNoDelay(true);
-    lastDnsActivityMs = millis();
-
-    ArduinoOTA.setHostname(DNS_HOSTNAME);
-    ArduinoOTA.begin();
-
-    pendingRefresh = true;
-  }
+  loadDnsCfg();
+  beginWifiAttempt();
   lastDashMs = millis();
   lastPeriodicPullMs = millis();
 }
 
 void loop() {
+  uint32_t loopStarted=micros();
+  if(restartAt && int32_t(millis()-restartAt)>=0) { cancelDownload=true; ESP.restart(); }
   // 收尾仍在进行中的面板刷新。一帧流式写入完成后，玻璃面板还需要
   // 约 15 s 才能稳定，这段时间就花在这里而不是绘图调用内部，
   // 因此 DNS 仍能持续得到应答。
-  epdServiceRefresh();
-
   web.handleClient();
-  ArduinoOTA.handle();
+  serviceDownload();
+  serviceUploads();
 
   if (WiFi.status() == WL_CONNECTED) {
     handleDns();
@@ -1235,7 +1522,10 @@ void loop() {
     expirePending();
   }
 
+  epdServiceRefresh();
   uint32_t now = millis();
+  static uint32_t cacheSweep=0;
+  if(now-cacheSweep>=1000) { dnsCache.expire(now); cacheSweep=now; }
 
   // 时钟跨过一天后就轮转一次当日汇总。`lastDay` 初值取 -1，让 NTP
   // 对时落地后的第一次 tick 只记录日期；否则首次同步时时钟从
@@ -1299,47 +1589,13 @@ void loop() {
   // 定期拉取黑名单，只在 DNS 已经安静下来之后执行。
   if (!portalMode && WiFi.status() == WL_CONNECTED &&
       updateIntervalH > 0 && updateUrl.length() &&
-      now - lastPeriodicPullMs >= updateIntervalH * 3600000UL &&
+      uint64_t(now - lastPeriodicPullMs) >= uint64_t(updateIntervalH) * 3600000ULL &&
       now - lastDnsActivityMs > REMOTE_FETCH_IDLE_MS) {
     fetchBlocklist(updateUrl);
     lastPeriodicPullMs = now;
   }
 
-  // 链路掉线后必须重新接上，否则设备就会悄无声息：过去重连只在
-  // 进入这里的第一轮之前发生一次，此后任何一次断连（路由器重启、
-  // 漫游到的 AP 消失、面板刷新期间的短暂掉线）都会让设备卡在
-  // 「ip offline」上，直到下一次断电重启。WL_CONNECTED 只覆盖
-  // 状态树的第一段分支；之后出现的任何其他状态都说明 station 已
-  // 掉线，应当把它重新拉起。
-  //
-  // 重试也要计数：一块板子怎么也连不回去的网络（密码改了、路由器
-  // 换了、板子挪了地方）否则会被永远重试下去，而没有人能从设备
-  // 本身纠正它。连续失败 WIFI_RETRY_BEFORE_PORTAL 次后，开发板放弃
-  // 存储的凭据并打开配网门户——当负责重连的人就站在面板前而不是
-  // 接着串口控制台时，「帮我重连 WiFi」就该是这个意思。
-  static uint32_t lastWifiRetryMs = 0;
-  static uint8_t  wifiFailCount  = 0;
-  if (!portalMode && WiFi.status() != WL_CONNECTED &&
-      now - lastWifiRetryMs >= LIVE_WIFI_RETRY_MS) {
-    lastWifiRetryMs = now;
-    wifiFailCount++;
-    LOG("[WIFI] link down (status %d), reconnect attempt %u/%u\n",
-        (int)WiFi.status(), (unsigned)wifiFailCount, (unsigned)WIFI_RETRY_BEFORE_PORTAL);
-
-    if (wifiFailCount >= WIFI_RETRY_BEFORE_PORTAL) {
-      wifiFailCount = 0;
-      LOGN("[WIFI] cannot reach the stored network - opening the setup portal");
-      startConfigPortal();
-    } else {
-      // 完整地重启射频，而不只是重试关联：凭据并没有变，仅靠
-      // WiFi.reconnect() 只会把那条已经失败过 N 次的握手原样
-      // 重跑一遍。
-      WiFi.disconnect(false, false);
-      delay(100);
-      connectWifi(WIFI_TIMEOUT);
-    }
-  }
-  if (WiFi.status() == WL_CONNECTED) wifiFailCount = 0;
+  serviceWifi();
 
   // 心跳。控制台只有一个（USB CDC 端口），AP 模式下也没有任何
   // 其他日志，因此这行状态信息让设备在没有调试器的情况下依然
@@ -1361,4 +1617,5 @@ void loop() {
 
   static uint32_t lastSave = 0;
   if (now - lastSave >= 300000UL) { trackerSave(); lastSave = now; }
+  uint32_t elapsedUs=micros()-loopStarted; if(elapsedUs>maxLoopUs) maxLoopUs=elapsedUs;
 }

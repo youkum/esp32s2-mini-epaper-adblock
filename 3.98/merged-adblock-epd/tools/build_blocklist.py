@@ -32,7 +32,7 @@ Usage: build_blocklist.py [out.bin] [src ...]
   --bloom-bits N   override Bloom filter size (default: 1048576 = 128 KB)
   --no-bloom       skip Bloom filter (header bloom_bits=0)
 """
-import sys, os, math, urllib.request, argparse
+import sys, os, math, urllib.request, argparse, tempfile
 
 HASH_BYTES = 5                          # 40-bit hashes — must match firmware
 MASK = (1 << (HASH_BYTES * 8)) - 1
@@ -98,13 +98,14 @@ def main():
     sources = args.sources if args.sources else DEFAULT_SOURCES
     bloom_bits = 0 if args.no_bloom else args.bloom_bits
 
+    if not args.no_bloom and not 1 <= bloom_bits <= 16777216:
+        ap.error("Bloom 位数必须为 1..16777216；禁用请使用 --no-bloom")
     domains = set()
     for src in sources:
         try:
             data = read_source(src)
         except Exception as e:
-            print(f'  !! skipped {src}: {e}', file=sys.stderr)
-            continue
+            ap.exit(1, f'读取来源失败，保留旧输出：{src}: {e}\n')
         for line in data.splitlines():
             line = line.split('#', 1)[0].strip()
             if not line or line[0] in '!/':
@@ -116,6 +117,9 @@ def main():
                 d = norm(d)
                 if '.' in d and ' ' not in d:
                     domains.add(d)
+
+    if not domains:
+        ap.exit(1, "来源没有有效域名，保留旧输出\n")
 
     # Compute 40-bit hashes for the sorted flash table
     domain_list = sorted(domains)
@@ -144,19 +148,28 @@ def main():
         bloom_bytes = bloom_arr
 
     # Write binary: header + bloom + hash table
-    with open(args.out, 'wb') as f:
-        header = bytearray(HEADER_SIZE)
-        header[0:4] = MAGIC
-        header[4] = VERSION
-        header[5] = HASH_BYTES
-        header[6:10] = num_hashes.to_bytes(4, 'little')
-        header[10:14] = bloom_bits.to_bytes(4, 'little')
-        header[14] = k
-        f.write(header)
-        if bloom_bytes:
-            f.write(bloom_bytes)
-        for h in uniq_hashes:
-            f.write(h.to_bytes(HASH_BYTES, 'little'))
+    out_dir = os.path.dirname(os.path.abspath(args.out))
+    fd, staged = tempfile.mkstemp(prefix='.blocklist-', dir=out_dir)
+    try:
+        with os.fdopen(fd, 'wb') as f:
+            header = bytearray(HEADER_SIZE)
+            header[0:4] = MAGIC
+            header[4] = VERSION
+            header[5] = HASH_BYTES
+            header[6:10] = num_hashes.to_bytes(4, 'little')
+            header[10:14] = bloom_bits.to_bytes(4, 'little')
+            header[14] = k
+            f.write(header)
+            if bloom_bytes:
+                f.write(bloom_bytes)
+            for h in uniq_hashes:
+                f.write(h.to_bytes(HASH_BYTES, 'little'))
+
+        os.replace(staged, args.out)
+    except BaseException:
+        if os.path.exists(staged):
+            os.unlink(staged)
+        raise
 
     blob_size = HEADER_SIZE + len(bloom_bytes) + num_hashes * HASH_BYTES
     bloom_kb = len(bloom_bytes) / 1024

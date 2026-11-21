@@ -27,14 +27,14 @@ static void paintBand(int rBase, int rows, uint8_t* buf) {
   else                              renderMessage();
 }
 
-// 流式发出完整一帧后立即返回，此时面板仍在迁移颜料；主 loop()
-// 会调用 epdServiceRefresh() 完成收尾，因此玻璃面板所需的
-// 约 15 s 不会妨碍 DNS 引擎应答查询。
-static void flushScreen() {
-  uint32_t ms = epdSendFrame(paintBand);
-  Serial.printf("[DASH] frame streamed in %lu ms, panel refreshing\n",
-                (unsigned long)ms);
-}
+// 只提交帧；数据快照在整个分带发送及有限重试期间保持不变。
+static void flushScreen() { epdSendFrame(paintBand); }
+struct FrameStats {
+  uint32_t blocked, allowed, allBlocked, uptime, peak, hours[HIST_SLOTS];
+  time_t now;
+  char ip[20];
+};
+static FrameStats snapshot;
 
 // ── 布局网格 ───────────────────────────────────────────────────────────
 // 整屏共用一套网格。所有位置都用这些常量表达，使分隔线、
@@ -121,7 +121,7 @@ static void drawHeader() {
   fillRectColor(0, 0, W, HEADER_H, COLOR_BLACK);
   drawTextColor("ADBLOCK DNS", 20, 17, 2, COLOR_WHITE);
 
-  const char* ip = deviceIpStr();
+  const char* ip = snapshot.ip;
   textRight(ip, W - 20, 17, 2, COLOR_WHITE);
 }
 
@@ -132,18 +132,18 @@ static void drawToday() {
 
   sectionTitle(COL_L_X, SECTION_Y, "今日拦截");
 
-  fmtGrouped(trackerTodayBlocked(), buf, sizeof(buf));
+  fmtGrouped(snapshot.blocked, buf, sizeof(buf));
   drawTextColor(buf, COL_L_X, 102, 8, COLOR_BLACK);
 
   hRule(COL_L_X, RULE_TOP_Y, COL_L_W);
 
-  uint32_t tot = trackerTodayBlocked() + trackerTodayTotal();
+  uint32_t tot = snapshot.blocked + snapshot.allowed;
 
   drawTextColor("查询总数", COL_L_X, 190, 2, COLOR_BLACK);
   snprintf(buf, sizeof(buf), "%lu", (unsigned long)tot);
   textRight(buf, COL_L_X + COL_L_W, 196, 3, COLOR_BLACK);
 
-  uint32_t rate10 = tot ? (uint32_t)((uint64_t)trackerTodayBlocked() * 1000ULL / tot) : 0;
+  uint32_t rate10 = tot ? (uint32_t)((uint64_t)snapshot.blocked * 1000ULL / tot) : 0;
   drawTextColor("拦截率", COL_L_X, 234, 2, COLOR_BLACK);
   snprintf(buf, sizeof(buf), "%lu.%lu%%",
            (unsigned long)(rate10 / 10), (unsigned long)(rate10 % 10));
@@ -161,7 +161,7 @@ static void drawHourly() {
   const int axisY = y0 + h;                 // == RULE_TOP_Y
   hRule(COL_R_X, axisY, COL_R_W);
 
-  uint32_t peak = trackerPeakHour();
+  uint32_t peak = snapshot.peak;
   if (peak == 0) {
     drawTextColor("暂无数据", COL_R_X, y0 + h / 2 - 16, 2, COLOR_BLACK);
     return;
@@ -170,7 +170,7 @@ static void drawHourly() {
   int slotW = COL_R_W / HIST_SLOTS;
   const int gap = 3;
   for (int i = 0; i < HIST_SLOTS; i++) {
-    uint32_t v = trackerHourBlocked(i);
+    uint32_t v = snapshot.hours[i];
     int bh = (int)((uint64_t)v * (h - 4) / peak);
     if (v > 0 && bh < 3) bh = 3;
     if (bh > 0) fillRectColor(COL_R_X + i * slotW, axisY - bh, slotW - gap, bh, COLOR_BLACK);
@@ -229,16 +229,16 @@ static void drawFooter() {
   char buf[24];
   char line[64];
 
-  fmtGrouped(trackerAllTimeBlocked(), buf, sizeof(buf));
+  fmtGrouped(snapshot.allBlocked, buf, sizeof(buf));
   snprintf(line, sizeof(line), "累计 %s", buf);
   drawTextColor(line, COL_L_X, FOOTER_Y, 2, COLOR_BLACK);
 
-  uint32_t up = deviceUptimeSec();
+  uint32_t up = snapshot.uptime;
   snprintf(line, sizeof(line), "运行 %lu天%lu时",
            (unsigned long)(up / 86400), (unsigned long)((up % 86400) / 3600));
   textCentered(line, FOOTER_Y, 2, COLOR_BLACK);
 
-  time_t now = time(nullptr);
+  time_t now = snapshot.now;
   if (now > 1700000000) {
     struct tm tmv; localtime_r(&now, &tmv);
     snprintf(line, sizeof(line), "更新 %02d:%02d", tmv.tm_hour, tmv.tm_min);
@@ -277,12 +277,19 @@ static void copyLine(char* dst, const char* src) {
 }
 
 void dashboardDraw() {
+  if (epdRefreshActive()) return;
+  snapshot.blocked = trackerTodayBlocked(); snapshot.allowed = trackerTodayTotal();
+  snapshot.allBlocked = trackerAllTimeBlocked(); snapshot.uptime = deviceUptimeSec();
+  snapshot.peak = trackerPeakHour(); snapshot.now = time(nullptr);
+  strncpy(snapshot.ip, deviceIpStr(), sizeof(snapshot.ip)-1);
+  for (int i=0; i<HIST_SLOTS; ++i) snapshot.hours[i] = trackerHourBlocked(i);
   trackerGetTop(s_top, LIST_ROWS * 2);
   s_screen = SCREEN_DASHBOARD;
   flushScreen();
 }
 
 void dashboardMessage(const char* line1, const char* line2, const char* line3) {
+  if (epdRefreshActive()) return;
   copyLine(s_msg[0], line1);
   copyLine(s_msg[1], line2);
   copyLine(s_msg[2], line3);

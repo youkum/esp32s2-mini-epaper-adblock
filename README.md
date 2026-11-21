@@ -41,7 +41,8 @@ DNS 拦截不能移除同域名承载的广告；浏览器或 App 的 DoH / 私�
 ## 它做什么
 
 * **端口 53 上的 DNS sinkhole**（UDP **与** TCP 双栈）。被拦截域名返回
-  `0.0.0.0`（A） / `::`（AAAA）；其余查询异步转发到 `9.9.9.9`。
+  `0.0.0.0`（A） / `::`（AAAA）；其余查询转发到可配置主 / 备上游
+  （默认 `9.9.9.9` / `1.1.1.1`），支持有界 TTL 缓存。
 * **blocklist 存于 flash**：排序后的 40-bit FNV-1a 哈希表，先用分配在
   PSRAM 中的 128 KB Bloom filter 预过滤；PSRAM 分配失败时回退到 flash 查找。
   其 v1 格式（magic `CADB`、
@@ -56,9 +57,9 @@ DNS 拦截不能移除同域名承载的广告；浏览器或 App 的 DoH / 私�
   以及「立即刷新屏幕」按钮。
 * **电子纸仪表盘，每 3 分钟刷新**：今日拦截数、总查询数与拦截率、
   24 条每小时直方图、Top 被拦截域名，以及含累计值与 uptime 的页脚。
-* **可自恢复的 WiFi 配置**：开机时依次尝试 `/wifi.cfg`、`secrets.h`、
-  再是 ESP-IDF 的 NVS 存储；全部失败则开启 `AdBlock-Setup` 接入点。
-  若运行中掉线，每 30 s 重试一次，连续 6 次失败后自动重新开启该门户。
+* **可自恢复的 WiFi 配置**：按 `/wifi.cfg` → `secrets.h` → ESP-IDF NVS
+  选择一组凭据，不在失败后轮试所有来源。开机超时进入 `AdBlock-Setup`；
+  运行中由非阻塞状态机重连，失败后退避 30 s，连续 6 次失败后开启门户。
   按住 **BOOT** 键 3 s 也可随时手动重新开启。
 * **OTA** 固件升级与 **mDNS**（`adblock.local`）。
 
@@ -108,7 +109,10 @@ Web OTA 不能上传 `firmware-merged.bin`。合成镜像路径见 [指南](GUID
 
 ## 下载 / 发行版
 
-当前发行版为 [v1.2.0](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases/tag/v1.2.0)。
+**待实机验收测试版：[v1.3.0](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases/tag/v1.3.0)**。
+改动见[更新说明](docs/releases/v1.3.0.md)，用户自测见[实机验收清单](docs/HARDWARE-TEST-CHECKLIST.md)。
+保留正式版 [v1.2.0](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases/tag/v1.2.0) 为 Latest；
+这不代表 v1.2.0 已完成全部硬件验收。下列附件名称按测试版列出。
 预编译的**合成固件镜像**（`firmware-merged.bin`，从偏移 `0x0` 烧写）附在
 [**Releases**](https://github.com/youkum/esp32s2-mini-epaper-adblock/releases)
 页面。合成镜像打包了 bootloader + partition table + 应用程序 + LittleFS
@@ -117,8 +121,8 @@ Web OTA 不能上传 `firmware-merged.bin`。合成镜像路径见 [指南](GUID
 - **首次部署 / 重新初始化**：下载 `firmware-merged.bin`，从 `0x0` 烧写，会覆盖已有配置。
 - **已有设备 Web OTA**：下载 `firmware.bin`，在控制台上传应用程序。
 - **仅更新列表**：下载 `blocklist.bin`，在规则更新卡片上传。
-- **手动分区烧写 / 调试**：使用 `esp32s2-flash-v1.2.0.zip` 或 `esp32s2-debug-v1.2.0.zip`。
-- **校验和与许可资料**：下载 `SHA256SUMS.txt`、`release-metadata.json` 和 `release-docs-v1.2.0.zip`。
+- **手动分区烧写 / 调试**：使用 `esp32s2-flash-v1.3.0.zip` 或 `esp32s2-debug-v1.3.0.zip`。
+- **校验和与许可资料**：下载 `SHA256SUMS.txt`、`release-metadata.json` 和 `release-docs-v1.3.0.zip`。
 
 历史 Release 不随 `master` 的源码提交自动更新。自行构建的验收记录见
 [构建验证记录](docs/BUILD-VERIFICATION.md)；对外发布新镜像前核对
