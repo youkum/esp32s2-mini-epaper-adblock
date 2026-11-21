@@ -4,7 +4,9 @@
 
 目标：ESP32-S2 mini / S2FNR2，4 MB flash、2 MB PSRAM。本版为待实机验收测试版。
 对应源码见 GitHub tag `v1.3.0`，精确提交写入同版 release-metadata.json。
-本轮未连接硬件，不填写无线性能、面板照片或 OTA 实机验收结果。
+发布前的构建验证未连接硬件。发布后已补充
+[完整烧写、启动自检与屏幕目视记录](HARDWARE-TEST-2026-11-21.md)；
+无线性能、TLS、OTA 和长跑尚未验收。
 
 ### 固件编译
 
@@ -46,7 +48,7 @@ LittleFS 按实际 4096 / 256 / 1,703,936 参数解包，唯一 blocklist.bin �
 应用 esptool image_info 的 checksum 和 validation hash 有效。
 烧写辅助脚本通过 Windows PowerShell 5.1 语法检查。
 指南核对了首次烧写、保留配置的 app 升级、Web OTA 文件选择、CA / 上游设置与恢复路径。
-新增实机串行 DNS 探针，--help 已检查，本轮没有向真实设备发送查询。
+新增实机串行 DNS 探针，--help 已检查。本次后续实机启动检查仍没有发送联网 DNS 查询。
 
 |产物|字节|SHA-256|
 |---|---:|---|
@@ -63,7 +65,8 @@ LittleFS 按实际 4096 / 256 / 1,703,936 参数解包，唯一 blocklist.bin �
 
 ### 实机待办
 
-见 [HARDWARE-TEST-CHECKLIST.md](HARDWARE-TEST-CHECKLIST.md)，全部结果标待测。
+见 [HARDWARE-TEST-CHECKLIST.md](HARDWARE-TEST-CHECKLIST.md)。完整烧写、无凭据启动、
+规则自检和屏幕显示已完成基础检查，其余结果继续标待测。
 特别验证新行间间隔、下载 / 刷新并发 DNS、WiFi 断线重绑、证书失败、OTA 失败不重启及长跑。
 
 ---

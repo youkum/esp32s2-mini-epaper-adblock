@@ -195,6 +195,13 @@ powershell -File 3.98/merged-adblock-epd/tools/flash_and_capture.ps1 -Port COM3 
 脚本默认从自身位置定位固件目录，不依赖旧电脑路径；`-Root` 可指定其他检出。
 它只上传应用程序，不上传文件系统。`-SkipBuild` 使用已有构建产物，应确认版本。
 
+**备份与离线查看。** 完整重新初始化前保留 Flash 备份，备份含 WiFi、密码和 token，
+仅保存在本机。离线查看已经运行过的 LittleFS 时，本次发现 PlatformIO 附带的旧
+`mklittlefs` 会漏列设备后写入的配置；使用
+[官方 mklittlefs 4.1.0](https://github.com/earlephilhower/mklittlefs/releases/tag/4.1.0)
+读取核对，解包目录在 Windows 下使用相对路径。不要因旧工具漏列就覆盖原配置；
+具体结果见[本次实机记录](docs/HARDWARE-TEST-2026-11-21.md)。
+
 > **读取原生 USB 控制台需要同时拉高 DTR 和 RTS。** ESP32-S2 的 USB CDC 只有在
 > 两者都置位时才报告 "connected"。很多串口工具默认把它们拉低，于是设备发出的
 > 每个字节都被静默丢弃。抓取脚本已替你置位。
@@ -620,7 +627,9 @@ python -m platformio run -d 3.98/merged-adblock-epd -e s2mini
 
 C++ 测试编译固件共享算法与真实面板驱动，以模拟 GPIO / 时间验证状态和总线字节，
 不是另一份 Python 实现。测试不覆盖真实电气时序、无线网络 / TLS 握手及掉电行为。
-本轮实机结果留空，按[实机验收清单](docs/HARDWARE-TEST-CHECKLIST.md)记录。
+2026-11-21 已完成完整烧写、启动自检和屏幕目视检查，见
+[本次实机记录](docs/HARDWARE-TEST-2026-11-21.md)。联网、更新失败保护和长跑继续按
+[实机验收清单](docs/HARDWARE-TEST-CHECKLIST.md)记录。
 
 *问题或修复：请在
 [issue tracker](https://github.com/youkum/esp32s2-mini-epaper-adblock/issues) 提 issue。*
