@@ -57,3 +57,7 @@ v1.3.0 沿用原工具链、旧黑名单及字形，未引入新的第三方固�
 使用 SDK 已有 Mbed TLS，OTA 使用 ESP-IDF。Windows 原生测试使用 Zig 0.14.1，
 工具仅本机使用，不随附件分发。旧列表和 SimHei 点阵的待补依据仍未解决；本次
 修复、编译和测试不构成许可完备结论。主要上游许可全文继续随文档包提供。
+
+本地 SDK 的 Mbed TLS 版本头部为 2.28.7；其[上游双许可原文](https://github.com/Mbed-TLS/mbedtls/blob/v2.28.7/LICENSE)
+为 Apache-2.0 OR GPL-2.0-or-later，v1.3.0 文档包新增该原文及来源哈希。
+版本头部不是 SDK 所有移植修改的完整来源证明；仍需按实际文件声明处理。

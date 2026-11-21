@@ -32,6 +32,13 @@ Xtensa 8.4.0+2021r2-patch5，esptool 4.9.0，mklittlefs 包 1.203.210628。
 - 控制台 JavaScript 语法、工作流 YAML 解析、git diff --check 通过。
 - 原生测试不能验证真实 GPIO 电气时序、TLS 握手、Web multipart 与 ESP-IDF OTA / 掉电行为。
 
+### GitHub CI
+
+[运行 44884049033](https://github.com/youkum/esp32s2-mini-epaper-adblock/actions/runs/44884049033)
+对修复提交 `536b88ad2a85d97969d9b653da19a7e204f08137` 验证通过：Ubuntu 24.04 / Python 3.12 / Clang
+原生 C++、脚本回归、字形、ESP32-S2、LittleFS、合成和产物上传均成功。
+本节之后的文档补充不改变上述固件源码；发行 metadata 分别记录源码基线和 tag 提交。
+
 ### 镜像与部署检查
 
 应用、分区表和 LittleFS 在合成镜像中的对应区段逐字节一致。

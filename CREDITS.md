@@ -76,8 +76,9 @@ sinkhole，不使用 InkSight 的服务；仍会访问上游 DNS、NTP 和用户
 * **Node.js** — `tools/*.js` 辅助脚本使用（MIT）。
 * **Zig 0.14.1** — <https://ziglang.org/>（MIT，附带 LLVM / Clang 等组件各按其许可）；
   本轮仅用于 Windows 原生 C++ 回归测试，不进入固件或 Release 附件。
-* **Mbed TLS** — 随 ESP-IDF SDK 使用，CA 解析、TLS 与 SHA-256 的实现；
-  条款按 SDK 内实际组件处理，不作为本项目自创算法。
+* **Mbed TLS 2.28.7** — 本地 SDK 版本头部确认；CA 解析、TLS 与 SHA-256 的实现。
+  [上游条款](https://github.com/Mbed-TLS/mbedtls/blob/v2.28.7/LICENSE)为 Apache-2.0 OR GPL-2.0-or-later，
+  文档包保留原文；SDK 的移植文件另按其文件声明处理，不作为本项目自创算法。
 * **Pillow** — <https://github.com/python-pillow/Pillow>（HPND 及所用版本的附属许可），
   仅在生成字体点阵时使用。使用生成工具的许可不替代输入字体的许可。
 
