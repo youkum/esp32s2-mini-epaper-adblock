@@ -1,6 +1,9 @@
 #include "epd_driver.h"
 #include "config.h"
 
+// 保留已实机验证的阶段日志；仅在状态切换时输出，便于核对 BUSY 与刷新耗时。
+#define EPD_TRACE 1
+
 // ── 软件 SPI（bit-bang 模拟）─────────────────────────────────
 // 面板接在任意指定的 GPIO 上，而驱动必须精确复现厂商字节级的总线
 // 行为，因此总线用 bit-bang 翻转 GPIO 来驱动，而不使用 SPI 外设。
@@ -117,7 +120,14 @@ static uint8_t retries = 0;
 static int rowDone = 0;
 static bool sawBusy = false;
 static const char* lastError = "无";
-static void enter(Phase p) { phase = p; phaseMs = millis(); }
+static void enter(Phase p) {
+#if EPD_TRACE
+  Serial.printf("[EPD-DIAG] 阶段 %u -> %u，历时 %lu ms，BUSY=%d，行=%d\n",
+                unsigned(phase), unsigned(p), static_cast<unsigned long>(millis()-phaseMs),
+                digitalRead(PIN_EPD_BUSY), rowDone);
+#endif
+  phase = p; phaseMs = millis();
+}
 static void fail(const char* reason) {
   lastError = reason; ++faults;
   digitalWrite(PIN_EPD_CS, HIGH);

@@ -71,7 +71,7 @@ Bloom 预过滤）与上游 v1 格式兼容，导入还受文件长度、非空�
 [详细指南的架构说明](../../GUIDE.md#17-架构说明)与
 [性能与已知上限](../../GUIDE.md#15-性能与已知上限)。
 
-## v1.3.0 回归入口
+## v1.3.1 回归入口
 
 ```bash
 python tools/test_native.py
@@ -83,4 +83,5 @@ node tools/check_font.js
 
 原生测试需 g++ / clang++，或 `--compiler C:/工具路径/zig.exe`。测试显式开启断言，
 不能用 `NDEBUG` 空断言制造通过。新状态、配置及接口见根目录指南第 18 节，
-实机待办见[验收清单](../../docs/HARDWARE-TEST-CHECKLIST.md)。
+实机记录和后续回归项目见[验收清单](../../docs/HARDWARE-TEST-CHECKLIST.md)。
+正式版及升级方式见[更新说明](../../docs/releases/v1.3.1.md)。
